@@ -285,11 +285,6 @@ export function SidebarLeft({
         </SidebarGroup>
         <NavAgents />
       </SidebarContent>
-      {state !== 'collapsed' && (
-        <div className="px-3 py-2">
-          <CTACard />
-        </div>
-      )}
       <SidebarFooter>
         {state === 'collapsed' && (
           <div className="mt-2 flex justify-center">
