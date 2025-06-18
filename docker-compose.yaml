@@ -1,6 +1,6 @@
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     ports:
       - "6379:6379"
     volumes:
@@ -12,6 +12,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+    networks:
+      - shared
 
   rabbitmq:
     image: rabbitmq
@@ -27,6 +29,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    networks:
+      - shared
 
   backend:
     image: ghcr.io/suna-ai/suna-backend:latest
@@ -54,6 +58,8 @@ services:
         condition: service_healthy
       worker:
         condition: service_started
+    networks:
+      - shared
 
   worker:
     image: ghcr.io/suna-ai/suna-backend:latest
@@ -78,6 +84,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    networks:
+      - shared
 
   frontend:
     init: true
@@ -85,7 +93,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "8711:8711"
     volumes:
       - ./frontend/.env.local:/app/.env.local:ro
     environment:
@@ -93,7 +101,16 @@ services:
     command: ["npm", "run", "start"]
     depends_on:
       - backend
+    networks:
+      - shared
 
 volumes:
   redis_data:
   rabbitmq_data:
+
+
+networks:
+  shared:
+    driver: bridge
+    name: shared
+    external: true

@@ -28,7 +28,7 @@ ENV NEXT_PUBLIC_VERCEL_ENV production
 
 RUN npm run build
 
-EXPOSE 3000
+EXPOSE 8711
 
 # Default command is dev, but can be overridden in docker-compose
 CMD ["npm", "start"]
