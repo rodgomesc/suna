@@ -96,6 +96,7 @@ services:
 
 volumes:
   redis_data:
+  rabbitmq_data:
 
 networks:
   shared:
