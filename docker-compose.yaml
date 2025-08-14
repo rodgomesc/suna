@@ -101,4 +101,3 @@ networks:
   shared:
     driver: bridge
     name: shared
-    external: true
