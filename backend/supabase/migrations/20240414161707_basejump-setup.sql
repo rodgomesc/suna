@@ -19,6 +19,7 @@
   * -------------------------------------------------------
  */
 
+-- Ensure pgcrypto extension is available
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- revoke execution by default from public

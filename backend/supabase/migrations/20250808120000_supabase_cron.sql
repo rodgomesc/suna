@@ -4,8 +4,10 @@
 BEGIN;
 
 -- Enable required extensions if not already enabled
-CREATE EXTENSION IF NOT EXISTS pg_cron;
-CREATE EXTENSION IF NOT EXISTS pg_net;
+DROP EXTENSION IF EXISTS pg_cron CASCADE;
+CREATE EXTENSION pg_cron;
+DROP EXTENSION IF EXISTS pg_net CASCADE;
+CREATE EXTENSION pg_net;
 
 -- Helper function to schedule an HTTP POST via Supabase Cron
 -- Overwrites existing job with the same name

@@ -1,5 +1,6 @@
 -- Enable UUID extension
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+DROP EXTENSION IF EXISTS "uuid-ossp" CASCADE;
+CREATE EXTENSION "uuid-ossp" WITH SCHEMA public;
 
 -- Create devices table first
 CREATE TABLE public.devices (

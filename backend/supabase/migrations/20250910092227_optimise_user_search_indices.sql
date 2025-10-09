@@ -1,4 +1,5 @@
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
+DROP EXTENSION IF EXISTS pg_trgm CASCADE;
+CREATE EXTENSION pg_trgm WITH SCHEMA public;
 
 CREATE INDEX IF NOT EXISTS idx_billing_customers_email_gin 
     ON basejump.billing_customers 
