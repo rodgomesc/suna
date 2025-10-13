@@ -19,7 +19,6 @@
   * -------------------------------------------------------
  */
 
--- Ensure pgcrypto extension is available
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- revoke execution by default from public
@@ -180,7 +179,7 @@ CREATE OR REPLACE FUNCTION basejump.generate_token(length int)
     RETURNS text AS
 $$
 select regexp_replace(replace(
-                              replace(replace(replace(encode(gen_random_bytes(length)::bytea, 'base64'), '/', ''), '+',
+                              replace(replace(replace(encode(extensions.gen_random_bytes(length)::bytea, 'base64'), '/', ''), '+',
                                               ''), '\', ''),
                               '=',
                               ''), E'[\\n\\r]+', '', 'g');
