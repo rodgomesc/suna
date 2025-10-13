@@ -3,7 +3,9 @@ from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 from uuid import uuid4
 import os
+import json
 import httpx
+import re
 
 from core.services.supabase import DBConnection
 from core.utils.logger import logger
@@ -32,6 +34,8 @@ class TemplateInstallationRequest:
     custom_system_prompt: Optional[str] = None
     profile_mappings: Optional[Dict[QualifiedName, ProfileId]] = None
     custom_mcp_configs: Optional[Dict[QualifiedName, ConfigType]] = None
+    trigger_configs: Optional[Dict[str, Dict[str, Any]]] = None
+    trigger_variables: Optional[Dict[str, Dict[str, str]]] = None
 
 @dataclass
 class TemplateInstallationResult:
@@ -40,6 +44,7 @@ class TemplateInstallationResult:
     name: Optional[str] = None
     missing_regular_credentials: List[Dict[str, Any]] = field(default_factory=list)
     missing_custom_configs: List[Dict[str, Any]] = field(default_factory=list)
+    missing_trigger_variables: Optional[Dict[str, Dict[str, Any]]] = None
     template_info: Optional[Dict[str, Any]] = None
 
 class TemplateInstallationError(Exception):
@@ -51,6 +56,41 @@ class InvalidCredentialError(Exception):
 class InstallationService:
     def __init__(self, db_connection: DBConnection):
         self._db = db_connection
+    
+    def _extract_trigger_variables(self, config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """Extract all trigger variables from template config"""
+        trigger_variables = {}
+        triggers = config.get('triggers', [])
+        
+        for i, trigger in enumerate(triggers):
+            trigger_config = trigger.get('config', {})
+            trigger_name = trigger.get('name', f'Trigger {i+1}')
+            agent_prompt = trigger_config.get('agent_prompt', '')
+            variables = trigger_config.get('trigger_variables', [])
+            
+            # If no variables were stored, try to extract them from the prompt
+            if not variables and agent_prompt:
+                pattern = r'\{\{(\w+)\}\}'
+                matches = re.findall(pattern, agent_prompt)
+                variables = list(set(matches))
+            
+            if variables:
+                trigger_key = f"trigger_{i}"
+                trigger_variables[trigger_key] = {
+                    'trigger_name': trigger_name,
+                    'trigger_index': i,
+                    'variables': variables,
+                    'agent_prompt': agent_prompt
+                }
+        
+        return trigger_variables
+    
+    def _replace_variables_in_text(self, text: str, variable_values: Dict[str, str]) -> str:
+        """Replace {{variable}} patterns in text with actual values"""
+        for var_name, var_value in variable_values.items():
+            pattern = r'\{\{' + re.escape(var_name) + r'\}\}'
+            text = re.sub(pattern, var_value, text)
+        return text
     
     async def install_template(self, request: TemplateInstallationRequest) -> TemplateInstallationResult:
         logger.debug(f"Installing template {request.template_id} for user {request.account_id}")
@@ -84,11 +124,35 @@ class InstallationService:
         logger.debug(f"Missing profiles: {[p['qualified_name'] for p in missing_profiles]}")
         logger.debug(f"Missing configs: {[c['qualified_name'] for c in missing_configs]}")
         
-        if missing_profiles or missing_configs:
+        # Check for trigger variables
+        trigger_variables = self._extract_trigger_variables(template.config)
+        missing_trigger_variables = {}
+        
+        if trigger_variables and not request.trigger_variables:
+            # All trigger variables are missing
+            missing_trigger_variables = trigger_variables
+        elif trigger_variables and request.trigger_variables:
+            # Check which trigger variables are still missing
+            for trigger_key, trigger_data in trigger_variables.items():
+                if trigger_key not in request.trigger_variables:
+                    missing_trigger_variables[trigger_key] = trigger_data
+                else:
+                    # Check if all required variables for this trigger are provided
+                    provided_vars = request.trigger_variables.get(trigger_key, {})
+                    missing_vars = []
+                    for var in trigger_data['variables']:
+                        if var not in provided_vars:
+                            missing_vars.append(var)
+                    if missing_vars:
+                        trigger_data['missing_variables'] = missing_vars
+                        missing_trigger_variables[trigger_key] = trigger_data
+        
+        if missing_profiles or missing_configs or missing_trigger_variables:
             return TemplateInstallationResult(
                 status='configs_required',
                 missing_regular_credentials=missing_profiles,
                 missing_custom_configs=missing_configs,
+                missing_trigger_variables=missing_trigger_variables if missing_trigger_variables else None,
                 template_info={
                     'template_id': template.template_id,
                     'name': template.name
@@ -114,7 +178,7 @@ class InstallationService:
             request.custom_system_prompt or template.system_prompt
         )
         
-        await self._restore_triggers(agent_id, request.account_id, template.config, request.profile_mappings)
+        await self._restore_triggers(agent_id, request.account_id, template.config, request.profile_mappings, request.trigger_configs, request.trigger_variables)
         
         await self._increment_download_count(template.template_id)
         
@@ -407,7 +471,9 @@ class InstallationService:
         agent_id: str,
         account_id: str,
         config: Dict[str, Any],
-        profile_mappings: Optional[Dict[str, str]] = None
+        profile_mappings: Optional[Dict[str, str]] = None,
+        trigger_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+        trigger_variables: Optional[Dict[str, Dict[str, str]]] = None
     ) -> None:
         triggers = config.get('triggers', [])
         if not triggers:
@@ -422,10 +488,38 @@ class InstallationService:
             trigger_config = trigger.get('config', {})
             provider_id = trigger_config.get('provider_id', '')
             
+            # Handle trigger variables if any
+            trigger_key = f"trigger_{i}"
+            agent_prompt = trigger_config.get('agent_prompt', '')
+            
+            if trigger_variables and trigger_key in trigger_variables and agent_prompt:
+                # Replace variables in the agent prompt
+                variable_values = trigger_variables[trigger_key]
+                agent_prompt = self._replace_variables_in_text(agent_prompt, variable_values)
+                trigger_config['agent_prompt'] = agent_prompt
+                logger.debug(f"Replaced variables in trigger {i} prompt: {variable_values}")
+            
             if provider_id == 'composio':
                 qualified_name = trigger_config.get('qualified_name')
                 
                 trigger_profile_key = f"{qualified_name}_trigger_{i}"
+                
+                trigger_specific_config = {}
+                if trigger_configs and trigger_profile_key in trigger_configs:
+                    trigger_specific_config = trigger_configs[trigger_profile_key].copy()
+                    logger.info(f"Using user-provided trigger config for {trigger_profile_key}: {trigger_specific_config}")
+                else:
+                    logger.info(f"No user trigger config found for key {trigger_profile_key}. Available keys: {list(trigger_configs.keys()) if trigger_configs else 'None'}")
+                
+                metadata_fields = {
+                    'provider_id', 'qualified_name', 'trigger_slug', 
+                    'agent_prompt', 'profile_id', 'composio_trigger_id',
+                    'trigger_fields'
+                }
+                
+                for key, value in trigger_config.items():
+                    if key not in metadata_fields and key not in trigger_specific_config:
+                        trigger_specific_config[key] = value
                 
                 success = await self._create_composio_trigger(
                     agent_id=agent_id,
@@ -435,9 +529,10 @@ class InstallationService:
                     is_active=trigger.get('is_active', True),
                     trigger_slug=trigger_config.get('trigger_slug', ''),
                     qualified_name=qualified_name,
-                    agent_prompt=trigger_config.get('agent_prompt'),
+                    agent_prompt=agent_prompt,  # Use the potentially modified agent_prompt
                     profile_mappings=profile_mappings,
-                    trigger_profile_key=trigger_profile_key
+                    trigger_profile_key=trigger_profile_key,
+                    trigger_specific_config=trigger_specific_config
                 )
                 
                 if success:
@@ -445,6 +540,11 @@ class InstallationService:
                 else:
                     failed_count += 1
             else:
+                # For schedule triggers, the agent_prompt is already updated in trigger_config
+                # We need to ensure trigger_variables are removed if they exist
+                clean_config = trigger_config.copy()
+                if 'trigger_variables' in clean_config:
+                    del clean_config['trigger_variables']
                 
                 trigger_data = {
                     'trigger_id': str(uuid4()),
@@ -453,7 +553,7 @@ class InstallationService:
                     'name': trigger.get('name', 'Unnamed Trigger'),
                     'description': trigger.get('description'),
                     'is_active': trigger.get('is_active', True),
-                    'config': trigger_config.copy(),
+                    'config': clean_config,
                     'created_at': datetime.now(timezone.utc).isoformat(),
                     'updated_at': datetime.now(timezone.utc).isoformat()
                 }
@@ -522,7 +622,8 @@ class InstallationService:
         qualified_name: Optional[str],
         agent_prompt: Optional[str],
         profile_mappings: Dict[str, str],
-        trigger_profile_key: Optional[str] = None
+        trigger_profile_key: Optional[str] = None,
+        trigger_specific_config: Optional[Dict[str, Any]] = None
     ) -> bool:
         try:
             if not trigger_slug:
@@ -593,30 +694,28 @@ class InstallationService:
             if vercel_bypass:
                 webhook_headers["X-Vercel-Protection-Bypass"] = vercel_bypass
 
+            logger.info(f"Creating trigger {trigger_slug} with config: {trigger_specific_config}")
+            
             body = {
                 "user_id": composio_user_id,
-                "userId": composio_user_id,
-                "trigger_config": {},
-                "triggerConfig": {},
-                "webhook": {
-                    "url": f"{base_url}/api/composio/webhook",
-                    "headers": webhook_headers,
-                    "method": "POST",
-                },
+                "trigger_config": trigger_specific_config or {},
             }
-
+            
             if connected_account_id:
-                body["connectedAccountId"] = connected_account_id
                 body["connected_account_id"] = connected_account_id
-                body["connectedAccountIds"] = [connected_account_id]
-                body["connected_account_ids"] = [connected_account_id]
                 logger.debug(f"Adding connected_account_id to Composio trigger request: {connected_account_id}")
             else:
                 logger.warning("No connected_account_id found - trigger creation may fail for OAuth apps")
             
             logger.debug(f"Creating Composio trigger with URL: {url}")
+            logger.debug(f"Request body: {json.dumps(body, indent=2)}")
+            
             async with httpx.AsyncClient(timeout=20) as http_client:
                 resp = await http_client.post(url, headers=headers, json=body)
+                
+                if resp.status_code != 200:
+                    logger.error(f"Composio API error response: {resp.status_code} - {resp.text}")
+                    
                 resp.raise_for_status()
                 created = resp.json()
             def _extract_id(obj: Dict[str, Any]) -> Optional[str]:
@@ -657,6 +756,10 @@ class InstallationService:
                 "profile_id": profile_id,
                 "provider_id": "composio"
             }
+            
+            if trigger_specific_config:
+                config.update(trigger_specific_config)
+            
             if agent_prompt:
                 config["agent_prompt"] = agent_prompt
 
