@@ -5,7 +5,6 @@ import { agentKeys } from './keys';
 import { Agent, AgentUpdateRequest, AgentsParams, createAgent, deleteAgent, getAgent, getAgents, getThreadAgent, updateAgent } from './utils';
 import { useRef, useCallback, useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import { DEFAULT_AGENTPRESS_TOOLS } from '@/components/agents/tools';
 
 export const useAgents = (
   params: AgentsParams = {},
@@ -32,6 +31,8 @@ export const useAgent = (agentId: string) => {
       enabled: !!agentId,
       staleTime: 5 * 60 * 1000,
       gcTime: 10 * 60 * 1000,
+      refetchOnMount: 'always',
+      refetchOnWindowFocus: true,
     }
   )();
 };
@@ -69,7 +70,7 @@ export const useCreateNewAgent = () => {
         name: 'New Agent',
         description: 'A newly created agent, open for configuration',
         configured_mcps: [],
-        agentpress_tools: DEFAULT_AGENTPRESS_TOOLS,
+        agentpress_tools: {},
         is_default: false,
         icon_name: 'brain',
         icon_color: '#000000',

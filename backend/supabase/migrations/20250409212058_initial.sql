@@ -4,7 +4,7 @@ CREATE EXTENSION "uuid-ossp" WITH SCHEMA public;
 
 -- Create devices table first
 CREATE TABLE public.devices (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
     account_id UUID NOT NULL,
     name TEXT,
     last_seen TIMESTAMP WITH TIME ZONE,
@@ -16,7 +16,7 @@ CREATE TABLE public.devices (
 
 -- Create recordings table
 CREATE TABLE public.recordings (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
     account_id UUID NOT NULL,
     device_id UUID NOT NULL,
     preprocessed_file_path TEXT,

@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
@@ -37,6 +38,7 @@ class AgentTemplate:
     name: str
     config: ConfigType
     tags: List[str] = field(default_factory=list)
+    categories: List[str] = field(default_factory=list)
     is_public: bool = False
     is_kortix_team: bool = False
     marketplace_published_at: Optional[datetime] = None
@@ -208,6 +210,7 @@ class TemplateService:
             name=agent['name'],
             config=sanitized_config,
             tags=tags or [],
+            categories=[],
             is_public=make_public,
             marketplace_published_at=datetime.now(timezone.utc) if make_public else None,
             icon_name=agent.get('icon_name'),
@@ -484,10 +487,24 @@ class TemplateService:
                 trigger_config = trigger.get('config', {})
                 provider_id = trigger_config.get('provider_id', '')
                 
+                agent_prompt = trigger_config.get('agent_prompt', '')
+                
                 sanitized_config = {
                     'provider_id': provider_id,
-                    'agent_prompt': trigger_config.get('agent_prompt', ''),
+                    'agent_prompt': agent_prompt,
                 }
+                
+                # Extract trigger variables if they exist in the prompt
+                trigger_variables = trigger_config.get('trigger_variables', [])
+                if not trigger_variables and agent_prompt:
+                    # Extract variables from the prompt using regex
+                    pattern = r'\{\{(\w+)\}\}'
+                    matches = re.findall(pattern, agent_prompt)
+                    if matches:
+                        trigger_variables = list(set(matches))
+                
+                if trigger_variables:
+                    sanitized_config['trigger_variables'] = trigger_variables
                 
                 if provider_id == 'schedule':
                     sanitized_config['cron_expression'] = trigger_config.get('cron_expression', '')
@@ -496,6 +513,28 @@ class TemplateService:
                     sanitized_config['trigger_slug'] = trigger_config.get('trigger_slug', '')
                     if 'qualified_name' in trigger_config:
                         sanitized_config['qualified_name'] = trigger_config['qualified_name']
+                    
+                    excluded_fields = {
+                        'profile_id', 'composio_trigger_id', 'provider_id', 
+                        'agent_prompt', 'trigger_slug', 'qualified_name', 'trigger_variables'
+                    }
+                    
+                    trigger_fields = {}
+                    for key, value in trigger_config.items():
+                        if key not in excluded_fields:
+                            if isinstance(value, bool):
+                                trigger_fields[key] = {'type': 'boolean', 'required': True}
+                            elif isinstance(value, (int, float)):
+                                trigger_fields[key] = {'type': 'number', 'required': True}
+                            elif isinstance(value, list):
+                                trigger_fields[key] = {'type': 'array', 'required': True}
+                            elif isinstance(value, dict):
+                                trigger_fields[key] = {'type': 'object', 'required': True}
+                            else:
+                                trigger_fields[key] = {'type': 'string', 'required': True}
+                    
+                    if trigger_fields:
+                        sanitized_config['trigger_fields'] = trigger_fields
 
                 sanitized_trigger = {
                     'name': trigger.get('name'),
@@ -585,6 +624,7 @@ class TemplateService:
             'name': template.name,
             'config': template.config,
             'tags': template.tags,
+            'categories': template.categories,
             'is_public': template.is_public,
             'marketplace_published_at': template.marketplace_published_at.isoformat() if template.marketplace_published_at else None,
             'download_count': template.download_count,
@@ -612,6 +652,7 @@ class TemplateService:
             name=data['name'],
             config=data.get('config', {}),
             tags=data.get('tags', []),
+            categories=data.get('categories', []),
             is_public=data.get('is_public', False),
             is_kortix_team=data.get('is_kortix_team', False),
             marketplace_published_at=datetime.fromisoformat(data['marketplace_published_at'].replace('Z', '+00:00')) if data.get('marketplace_published_at') else None,
