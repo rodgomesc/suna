@@ -28,25 +28,25 @@ NEXT_PUBLIC_ENV_MODE=LOCAL
 Install dependencies:
 
 ```bash
-npm install
+bun install
 ```
 
 Run the development server:
 
 ```bash
-npm run dev
+bun run dev
 ```
 
 Build for production:
 
 ```bash
-npm run build
+bun run build
 ```
 
 Run the production server:
 
 ```bash
-npm run start
+bun run start
 ```
 
 ## Development Notes
