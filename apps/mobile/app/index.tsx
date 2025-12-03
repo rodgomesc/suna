@@ -1,121 +1,121 @@
-import { AuthOverlay } from '@/components/AuthOverlay';
-import { ChatContainer } from '@/components/ChatContainer';
-import { ChatHeader } from '@/components/ChatHeader';
-import { PanelContainer } from '@/components/PanelContainer';
-import { Skeleton } from '@/components/Skeleton';
-import { useAuth } from '@/hooks/useAuth';
-import { useChatSession, useNewChatSession } from '@/hooks/useChatHooks';
-import { useThemedStyles } from '@/hooks/useThemeColor';
-import {
-    useIsNewChatMode,
-    useLeftPanelVisible,
-    useRightPanelVisible,
-    useSelectedProject,
-    useSetLeftPanelVisible,
-    useSetRightPanelVisible
-} from '@/stores/ui-store';
+import * as React from 'react';
 import { View } from 'react-native';
+import { useRouter, Stack } from 'expo-router';
+import { KortixLoader } from '@/components/ui';
+import { useAuthContext, useBillingContext } from '@/contexts';
+import { useOnboarding } from '@/hooks/useOnboarding';
+import { usePushNotifications } from '@/hooks/usePushNotifications';
 
-export default function HomeScreen() {
-    // Use store state instead of local state for panel visibility
-    const leftPanelVisible = useLeftPanelVisible();
-    const rightPanelVisible = useRightPanelVisible();
-    const setLeftPanelVisible = useSetLeftPanelVisible();
-    const setRightPanelVisible = useSetRightPanelVisible();
+// Safely import and configure expo-notifications
+let Notifications: typeof import('expo-notifications') | null = null;
+try {
+  Notifications = require('expo-notifications');
+  if (Notifications && Notifications.setNotificationHandler) {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldPlaySound: true,
+        shouldSetBadge: true,
+        shouldShowBanner: true,
+        shouldShowList: true,
+      }),
+    });
+  }
+} catch (error) {
+  console.warn('expo-notifications module not available:', error);
+}
 
-    const { user, loading } = useAuth();
-    const selectedProject = useSelectedProject();
-    const isNewChatMode = useIsNewChatMode();
+/**
+ * Splash/Decision Screen
+ * 
+ * This is the ONLY place that decides where to route users.
+ * Account initialization now happens automatically via backend webhook on signup,
+ * so most users will go directly to onboarding or home.
+ */
+export default function SplashScreen() {
+  const router = useRouter();
+  const { isAuthenticated, isLoading: authLoading } = useAuthContext();
+  const { hasCompletedOnboarding, isLoading: onboardingLoading } = useOnboarding();
+  const { hasActiveSubscription, isLoading: billingLoading, subscriptionData } = useBillingContext();
+  const { expoPushToken } = usePushNotifications();
+  console.log('expoPushToken', expoPushToken);
+  
+  // Track navigation to prevent double navigation
+  const [hasNavigated, setHasNavigated] = React.useState(false);
+  
+  // Reset navigation flag when component mounts (fresh visit to splash)
+  React.useEffect(() => {
+    setHasNavigated(false);
+  }, []);
 
-    // Use appropriate chat session based on mode
-    const projectChatSession = useChatSession(
-        (!isNewChatMode && selectedProject?.id && selectedProject.id !== 'new-chat-temp')
-            ? selectedProject.id
-            : ''
-    );
-    const newChatSession = useNewChatSession();
+  // Compute ready state
+  // - Auth must be done loading
+  // - If authenticated: billing must be done loading AND have data
+  // - Onboarding check must be done
+  const authReady = !authLoading;
+  const billingReady = !isAuthenticated || (!billingLoading && subscriptionData !== null);
+  const onboardingReady = !isAuthenticated || !onboardingLoading;
+  const allDataReady = authReady && billingReady && onboardingReady;
 
-    // Extract messages from both sessions
-    const newChatMessages = newChatSession.messages;
-    const projectMessages = projectChatSession.messages;
+  // Debug logging
+  React.useEffect(() => {
+    console.log('📊 Splash:', {
+      authLoading,
+      isAuthenticated,
+      billingLoading,
+      subscriptionData: subscriptionData ? '✓' : '✗',
+      onboardingLoading,
+      hasCompletedOnboarding,
+      hasActiveSubscription,
+      allDataReady,
+      hasNavigated
+    });
+  }, [authLoading, isAuthenticated, billingLoading, subscriptionData, onboardingLoading, hasCompletedOnboarding, hasActiveSubscription, allDataReady, hasNavigated]);
 
-    // Select the right session based on mode
-    const { messages } = isNewChatMode ? newChatSession : projectChatSession;
+  React.useEffect(() => {
+    // Don't navigate twice
+    if (hasNavigated) return;
+    
+    // Wait until all data is ready
+    if (!allDataReady) return;
 
-    // Simple fallback for tools panel - use newChatMessages OR messages
-    const newchatmessages = (newChatMessages && newChatMessages.length > 0) ? newChatMessages : messages;
+    // Small delay to ensure React state is settled
+    const timer = setTimeout(() => {
+      if (hasNavigated) return;
+      setHasNavigated(true);
 
-    // Basic logging to see which message state we have
-    console.log('=== MESSAGE STATE DEBUG ===');
-    console.log('isNewChatMode:', isNewChatMode);
-    console.log('newChatMessages length:', newChatMessages?.length || 0);
-    console.log('projectMessages length:', projectMessages?.length || 0);
-    console.log('selected messages length:', messages?.length || 0);
-    console.log('fallback newchatmessages length:', newchatmessages?.length || 0);
-    console.log('=============================');
+      // ROUTING DECISION
+      if (!isAuthenticated) {
+        console.log('🚀 → /auth (not authenticated)');
+        router.replace('/auth');
+        return;
+      }
 
-    const toggleLeftPanel = () => setLeftPanelVisible(!leftPanelVisible);
-    const toggleRightPanel = () => setRightPanelVisible(!rightPanelVisible);
+      // User is authenticated
+      // Account initialization happens automatically via webhook on signup.
+      // Most users will have a subscription by now. Only show setting-up
+      // as a fallback if webhook failed or user signed up before this change.
+      if (!hasActiveSubscription) {
+        console.log('🚀 → /setting-up (fallback: no subscription detected)');
+        router.replace('/setting-up');
+      } else if (!hasCompletedOnboarding) {
+        console.log('🚀 → /onboarding');
+        router.replace('/onboarding');
+      } else {
+        console.log('🚀 → /home');
+        router.replace('/home');
+      }
+    }, 100);
 
-    const styles = useThemedStyles((theme) => ({
-        container: {
-            flex: 1,
-            backgroundColor: theme.background,
-        },
-        header: {
-            backgroundColor: theme.background,
-            borderBottomWidth: 1,
-            borderBottomColor: theme.border,
-            justifyContent: 'center' as const,
-        },
-        chatContainer: {
-            flex: 1,
-        },
-    }));
+    return () => clearTimeout(timer);
+  }, [allDataReady, hasNavigated, isAuthenticated, hasActiveSubscription, hasCompletedOnboarding, router]);
 
-    if (loading) {
-        return (
-            <View style={styles.container}>
-                <Skeleton />
-            </View>
-        );
-    }
+  return (
+    <>
+      <Stack.Screen options={{ headerShown: false }} />
+      <View className="flex-1 bg-background items-center justify-center">
+        <KortixLoader size="xlarge" />
+      </View>
+    </>
+  );
+}
 
-    if (!user) {
-        return (
-            <View style={styles.container}>
-                <AuthOverlay
-                    visible={true}
-                    onClose={() => { }}
-                />
-            </View>
-        );
-    }
-
-    return (
-        <View style={styles.container}>
-            <PanelContainer
-                leftPanelVisible={leftPanelVisible}
-                rightPanelVisible={rightPanelVisible}
-                onCloseLeft={() => {
-                    console.log('onCloseLeft called');
-                    setLeftPanelVisible(false);
-                }}
-                onCloseRight={() => setRightPanelVisible(false)}
-                onOpenLeft={() => setLeftPanelVisible(true)}
-                messages={newchatmessages}
-            >
-                <View style={styles.header}>
-                    <ChatHeader
-                        onMenuPress={toggleLeftPanel}
-                        onSettingsPress={toggleRightPanel}
-                        selectedProject={selectedProject}
-                    />
-                </View>
-                <View style={styles.chatContainer}>
-                    <ChatContainer />
-                </View>
-            </PanelContainer>
-        </View>
-    );
-} 

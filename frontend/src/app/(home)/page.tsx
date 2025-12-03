@@ -1,46 +1,52 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { CTASection } from '@/components/home/sections/cta-section';
-// import { FAQSection } from "@/components/sections/faq-section";
-import { FooterSection } from '@/components/home/sections/footer-section';
-import { HeroSection } from '@/components/home/sections/hero-section';
-import { OpenSourceSection } from '@/components/home/sections/open-source-section';
-import { PricingSection } from '@/components/home/sections/pricing-section';
-import { UseCasesSection } from '@/components/home/sections/use-cases-section';
-import { ModalProviders } from '@/providers/modal-providers';
-import { HeroVideoSection } from '@/components/home/sections/hero-video-section';
+import { Suspense, lazy } from 'react';
 import { BackgroundAALChecker } from '@/components/auth/background-aal-checker';
-import { BentoSection } from '@/components/home/sections/bento-section';
-import { CompanyShowcase } from '@/components/home/sections/company-showcase';
-import { FeatureSection } from '@/components/home/sections/feature-section';
-import { QuoteSection } from '@/components/home/sections/quote-section';
-import { TestimonialSection } from '@/components/home/sections/testimonial-section';
-import { FAQSection } from '@/components/home/sections/faq-section';
-import { AgentShowcaseSection } from '@/components/home/sections/agent-showcase-section';
-import { DeliverablesSection } from '@/components/home/sections/deliverables-section';
-import { CapabilitiesSection } from '@/components/home/sections/capabilities-section';
+import { HeroSection as NewHeroSection } from '@/components/home/hero-section';
+
+// Lazy load below-the-fold components for faster FCP/LCP
+const ShowCaseSection = lazy(() => 
+  import('@/components/home/showcase-section').then(mod => ({ default: mod.ShowCaseSection }))
+);
+const WordmarkFooter = lazy(() => 
+  import('@/components/home/wordmark-footer').then(mod => ({ default: mod.WordmarkFooter }))
+);
+
+// Skeleton placeholder for ShowCaseSection while loading
+function ShowCaseSkeleton() {
+  return (
+    <section className="w-full px-6 py-16 md:py-24 lg:py-32">
+      <div className="max-w-7xl mx-auto">
+        <div className="text-center mb-12 md:mb-16">
+          <div className="h-12 w-96 max-w-full mx-auto bg-muted/30 rounded-lg animate-pulse" />
+          <div className="h-6 w-80 max-w-full mx-auto bg-muted/20 rounded-lg mt-4 animate-pulse" />
+        </div>
+        <div className="space-y-6">
+          {[1, 2].map((i) => (
+            <div key={i} className="h-[400px] bg-muted/10 rounded-[24px] animate-pulse" />
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
 
 export default function Home() {
   return (
     <>
-      <ModalProviders />
       <BackgroundAALChecker>
-        <main className="flex flex-col items-center justify-center min-h-screen w-full">
-          <div className="w-full divide-y divide-border">
-            <HeroSection />
-            <CapabilitiesSection />
-            {/* <DeliverablesSection />             */}
-            <BentoSection />
-            
-            {/* <AgentShowcaseSection /> */}
-            <OpenSourceSection />
-            <PricingSection />
-            {/* <TestimonialSection /> */}
-            {/* <FAQSection /> */}
-            <CTASection />
-            <FooterSection />
-          </div>
+        <main className="w-full">
+          {/* Hero is critical for LCP - load immediately */}
+          <NewHeroSection />
+          
+          {/* Below-the-fold content - lazy loaded with Suspense */}
+          <Suspense fallback={<ShowCaseSkeleton />}>
+            <ShowCaseSection />
+          </Suspense>
+          
+          <Suspense fallback={null}>
+            <WordmarkFooter />
+          </Suspense>
         </main>
       </BackgroundAALChecker>
     </>

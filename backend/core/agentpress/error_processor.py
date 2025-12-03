@@ -8,7 +8,6 @@ throughout the agent execution pipeline using LiteLLM's standardized exceptions.
 from typing import Dict, Any, Optional, Union
 from dataclasses import dataclass
 from core.utils.logger import logger
-import re
 
 # Import LiteLLM exceptions as documented at https://docs.litellm.ai/docs/exception_mapping
 try:
@@ -74,9 +73,17 @@ class ErrorProcessor:
         error_message = ErrorProcessor.safe_error_to_string(error)
         
         if isinstance(error, ContextWindowExceededError):
+            # Clean up the error message - remove fallback details for user-facing message
+            clean_message = error_message
+            if "Received Model Group=" in error_message:
+                # Extract just the core error before fallback attempts
+                parts = error_message.split(". Received Model Group=")
+                if parts:
+                    clean_message = parts[0]
+            
             return ProcessedError(
                 error_type="context_window_exceeded",
-                message=f"Context window exceeded: The conversation is too long for this model. {error_message}",
+                message=f"Context window exceeded: The conversation is too long for this model. Please try starting a new conversation or use a model with a larger context window. {clean_message}",
                 original_error=error,
                 context=context
             )
@@ -130,9 +137,20 @@ class ErrorProcessor:
             )
         
         elif isinstance(error, BadRequestError):
+            # Clean up the error message - extract just the core error, not fallback details
+            clean_message = error_message
+            # If message contains fallback details, extract just the first error
+            if "Received Model Group=" in error_message:
+                # Extract the actual error before fallback details
+                parts = error_message.split(". Received Model Group=")
+                if parts:
+                    clean_message = parts[0]
+            # If it's a Bedrock content block error, make it user-friendly
+            if "ContentBlock" in clean_message and "is blank" in clean_message:
+                clean_message = "Message contains empty content blocks. This may be a data formatting issue. Please try starting a new conversation."
             return ProcessedError(
                 error_type="bad_request",
-                message=f"Invalid request: {error_message}",
+                message=f"Invalid request: {clean_message}",
                 original_error=error,
                 context=context
             )
@@ -176,14 +194,9 @@ class ErrorProcessor:
     
     @staticmethod
     def safe_error_to_string(error: Exception) -> str:
-        """Safely convert an exception to a string, cleaning up verbose LiteLLM error messages."""
+        """Safely convert an exception to a string with fallback"""
         try:
-            error_str = str(error)
-            # remove fallback information
-            if "Fallbacks=[" in error_str:
-                error_str = re.sub(r'Fallbacks=\[(?:[^\[\]]+|\[(?:[^\[\]]+|\[[^\[\]]*\])*\])*\]', '', error_str)
-            
-            return error_str
+            return str(error)
             
         except Exception:
             try:

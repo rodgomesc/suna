@@ -41,8 +41,9 @@ import { UnifiedKbEntryModal } from './unified-kb-entry-modal';
 import { KBFilePreviewModal } from './kb-file-preview-modal';
 import { EditSummaryModal } from './edit-summary-modal';
 import { KBDeleteConfirmDialog } from './kb-delete-confirm-dialog';
-import { useKnowledgeFolders, type Folder, type Entry } from '@/hooks/react-query/knowledge-base/use-folders';
+import { useKnowledgeFolders, type Folder, type Entry } from '@/hooks/knowledge-base/use-folders';
 import { FileNameValidator } from '@/lib/validation';
+import { backendApi } from '@/lib/api-client';
 import { createClient } from '@/lib/supabase/client';
 
 const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || '';
@@ -84,7 +85,7 @@ export function KnowledgeBaseManager({
     showHeader = true,
     headerTitle = "Knowledge Base",
     headerDescription = "Organize documents and files for AI agents to search and reference",
-    showRecentFiles = true,
+    showRecentFiles = false,
     emptyStateMessage,
     emptyStateContent,
     maxHeight,
@@ -190,7 +191,7 @@ export function KnowledgeBaseManager({
         if (enableAssignments && agentId) {
             console.log('Loading assignments immediately for agent:', agentId);
             loadAssignments();
-            
+
             // Auto-fetch all folder entries in assignment mode
             if (!foldersLoading && folders.length > 0) {
                 console.log('Auto-fetching all folder entries for assignment mode');
@@ -205,13 +206,13 @@ export function KnowledgeBaseManager({
 
     const loadAssignments = async () => {
         if (!agentId) return;
-        
+
         console.log('🔄 Starting to load assignments for agent:', agentId);
         setAssignmentsLoading(true);
         try {
             const supabase = createClient();
             const { data: { session } } = await supabase.auth.getSession();
-            
+
             if (!session?.access_token) {
                 console.warn('❌ No access token available for assignments');
                 return;
@@ -230,7 +231,7 @@ export function KnowledgeBaseManager({
             if (response.ok) {
                 const assignments = await response.json();
                 console.log('📊 Raw assignments data:', assignments);
-                
+
                 const selectedSet = new Set<string>();
                 Object.entries(assignments).forEach(([entryId, enabled]) => {
                     if (enabled) {
@@ -367,11 +368,11 @@ export function KnowledgeBaseManager({
 
     const saveAssignments = async (selectedSet: Set<string>) => {
         if (!agentId) return;
-        
+
         try {
             const supabase = createClient();
             const { data: { session } } = await supabase.auth.getSession();
-            
+
             if (!session?.access_token) return;
 
             const response = await fetch(`${API_URL}/knowledge-base/agents/${agentId}/assignments`, {
@@ -443,16 +444,15 @@ export function KnowledgeBaseManager({
         }
 
         try {
-            const supabase = createClient();
+            const response = await backendApi.put(
+                `/knowledge-base/folders/${editingFolder}`,
+                { name: trimmedName },
+                { showErrors: false }
+            );
 
-            const { error } = await supabase
-                .from('knowledge_base_folders')
-                .update({ name: trimmedName })
-                .eq('folder_id', editingFolder);
-
-            if (error) {
-                console.error('Supabase error:', error);
-                if (error.message?.includes('duplicate') || error.code === '23505') {
+            if (response.error) {
+                console.error('Error updating folder:', response.error);
+                if (response.error.message?.includes('duplicate') || response.error.code === '23505') {
                     toast.error('A folder with this name already exists');
                 } else {
                     toast.error('Failed to rename folder');
@@ -853,7 +853,7 @@ export function KnowledgeBaseManager({
                         {enableAssignments && <Skeleton className="h-5 w-9 rounded-full" />} {/* Assignment switch */}
                         <Skeleton className="h-6 w-6" /> {/* Actions */}
                     </div>
-                    
+
                     {/* File skeletons (indented) */}
                     <div className="ml-6 space-y-2">
                         <div className="flex items-center gap-3 p-3 rounded-lg border border-border/20">
@@ -904,7 +904,7 @@ export function KnowledgeBaseManager({
         );
     }
 
-    const defaultEmptyMessage = enableAssignments 
+    const defaultEmptyMessage = enableAssignments
         ? `No knowledge base content available. Create folders and upload files to provide ${agentName} with searchable knowledge.`
         : "Start building your knowledge base by creating folders and uploading files.";
 
@@ -990,7 +990,7 @@ export function KnowledgeBaseManager({
             )}
 
             {/* Main Content */}
-            <div 
+            <div
                 className="space-y-4"
                 style={{ maxHeight }}
                 onDragOver={(e) => e.preventDefault()}

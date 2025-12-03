@@ -1,39 +1,52 @@
-import { FileBrowserModal } from '@/components/FileBrowser';
-import { AuthProvider } from '@/hooks/useAuth';
-import { cleanupAppState, initializeAppState, initializePersistence, queryClient } from '@/stores/query-client';
-import { QueryClientProvider } from '@tanstack/react-query';
-import React, { useEffect } from 'react';
+/**
+ * App Providers
+ * 
+ * Wraps the app with all necessary providers:
+ * - React Query
+ * - Authentication
+ * - Internationalization
+ * - Agent Management
+ * - Advanced Features
+ */
+
+import { useState } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { AuthProvider } from '@/contexts/AuthContext';
+import { LanguageProvider } from '@/contexts/LanguageContext';
+import { AgentProvider } from '@/contexts/AgentContext';
+import { AdvancedFeaturesProvider } from '@/contexts/AdvancedFeaturesContext';
+import { PresenceProvider } from '@/contexts/PresenceContext';
 
 interface AppProvidersProps {
-    children: React.ReactNode;
+  children: React.ReactNode;
 }
 
-export const AppProviders: React.FC<AppProvidersProps> = ({ children }) => {
-    useEffect(() => {
-        // Initialize persistence and app state management
-        const initialize = async () => {
-            try {
-                await initializePersistence();
-                initializeAppState();
-            } catch (error) {
-                console.error('Failed to initialize app providers:', error);
-            }
-        };
+export function AppProviders({ children }: AppProvidersProps) {
+  // Initialize QueryClient inline (modern React Query pattern)
+  const [queryClient] = useState(() => new QueryClient({
+    defaultOptions: {
+      queries: {
+        retry: 2,
+        staleTime: 5 * 60 * 1000, // 5 minutes
+        refetchOnWindowFocus: false,
+      },
+    },
+  }));
 
-        initialize();
-
-        // Cleanup on unmount
-        return () => {
-            cleanupAppState();
-        };
-    }, []);
-
-    return (
-        <QueryClientProvider client={queryClient}>
-            <AuthProvider>
+  return (
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <PresenceProvider>
+          <AgentProvider>
+            <LanguageProvider>
+              <AdvancedFeaturesProvider>
                 {children}
-                <FileBrowserModal />
-            </AuthProvider>
-        </QueryClientProvider>
-    );
-}; 
+              </AdvancedFeaturesProvider>
+            </LanguageProvider>
+          </AgentProvider>
+        </PresenceProvider>
+      </AuthProvider>
+    </QueryClientProvider>
+  );
+}
+

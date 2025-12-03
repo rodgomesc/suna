@@ -11,9 +11,9 @@ import hmac
 from core.services.supabase import DBConnection
 from core.utils.auth_utils import verify_and_get_user_id_from_jwt
 from core.utils.logger import logger
-from core.utils.config import config
+from core.utils.config import config, EnvMode
 # Billing checks now handled by billing_integration.check_model_and_billing_access
-from core.billing.billing_integration import billing_integration
+from core.billing.credits.integration import billing_integration
 
 from .trigger_service import get_trigger_service, TriggerType
 from .provider_service import get_provider_service
@@ -168,12 +168,8 @@ async def get_agent_triggers(
         trigger_service = get_trigger_service(db)
         triggers = await trigger_service.get_agent_triggers(agent_id)
         
-        base_url = os.getenv("WEBHOOK_BASE_URL", "http://localhost:8000")
-        
         responses = []
         for trigger in triggers:
-            webhook_url = f"{base_url}/api/triggers/{trigger.trigger_id}/webhook"
-            
             responses.append(TriggerResponse(
                 trigger_id=trigger.trigger_id,
                 agent_id=trigger.agent_id,
@@ -182,7 +178,7 @@ async def get_agent_triggers(
                 name=trigger.name,
                 description=trigger.description,
                 is_active=trigger.is_active,
-                webhook_url=webhook_url,
+                webhook_url=None,
                 created_at=trigger.created_at.isoformat(),
                 updated_at=trigger.updated_at.isoformat(),
                 config=trigger.config
@@ -228,12 +224,9 @@ async def get_all_user_triggers(
         if not triggers_result.data:
             return []
         
-        base_url = os.getenv("WEBHOOK_BASE_URL", "http://localhost:8000")
-        
         responses = []
         for trigger in triggers_result.data:
             agent_id = trigger['agent_id']
-            webhook_url = f"{base_url}/api/triggers/{trigger['trigger_id']}/webhook"
 
             config = trigger.get('config', {})
             if isinstance(config, str):
@@ -251,7 +244,7 @@ async def get_all_user_triggers(
                 'name': trigger['name'],
                 'description': trigger.get('description'),
                 'is_active': trigger.get('is_active', False),
-                'webhook_url': webhook_url,
+                'webhook_url': None,
                 'created_at': trigger['created_at'],
                 'updated_at': trigger['updated_at'],
                 'config': config,
@@ -348,11 +341,31 @@ async def create_agent_trigger(
     request: TriggerCreateRequest,
     user_id: str = Depends(verify_and_get_user_id_from_jwt)
 ):
-    """Create a new trigger for an agent"""
-        
     await verify_and_authorize_trigger_agent_access(agent_id, user_id)
     
     try:
+        if config.ENV_MODE != EnvMode.LOCAL:
+            client = await db.client
+            
+            provider_service = get_provider_service(db)
+            provider_trigger_type = await provider_service.get_provider_trigger_type(request.provider_id)
+            trigger_type_str = 'scheduled' if provider_trigger_type.value == 'schedule' else 'app'
+            
+            from core.utils.limits_checker import check_trigger_limit
+            limit_check = await check_trigger_limit(client, user_id, agent_id, trigger_type_str)
+            
+            if not limit_check['can_create']:
+                error_detail = {
+                    "message": f"Maximum of {limit_check['limit']} {trigger_type_str} triggers allowed for your current plan. You have {limit_check['current_count']} {trigger_type_str} triggers.",
+                    "current_count": limit_check['current_count'],
+                    "limit": limit_check['limit'],
+                    "tier_name": limit_check['tier_name'],
+                    "trigger_type": trigger_type_str,
+                    "error_code": "TRIGGER_LIMIT_EXCEEDED"
+                }
+                logger.warning(f"Trigger limit exceeded for account {user_id}: {limit_check['current_count']}/{limit_check['limit']} {trigger_type_str} triggers")
+                raise HTTPException(status_code=402, detail=error_detail)
+        
         trigger_service = get_trigger_service(db)
         
         trigger = await trigger_service.create_trigger(
@@ -363,11 +376,7 @@ async def create_agent_trigger(
             description=request.description
         )
         
-        # Sync triggers to version config after creation
         await sync_triggers_to_version_config(agent_id)
-        
-        base_url = os.getenv("WEBHOOK_BASE_URL", "http://localhost:8000")
-        webhook_url = f"{base_url}/api/triggers/{trigger.trigger_id}/webhook"
         
         return TriggerResponse(
             trigger_id=trigger.trigger_id,
@@ -377,7 +386,7 @@ async def create_agent_trigger(
             name=trigger.name,
             description=trigger.description,
             is_active=trigger.is_active,
-            webhook_url=webhook_url,
+            webhook_url=None,
             created_at=trigger.created_at.isoformat(),
             updated_at=trigger.updated_at.isoformat(),
             config=trigger.config
@@ -385,6 +394,8 @@ async def create_agent_trigger(
         
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating trigger: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -406,9 +417,6 @@ async def get_trigger(
         
         await verify_and_authorize_trigger_agent_access(trigger.agent_id, user_id)
         
-        base_url = os.getenv("WEBHOOK_BASE_URL", "http://localhost:8000")
-        webhook_url = f"{base_url}/api/triggers/{trigger_id}/webhook"
-        
         return TriggerResponse(
             trigger_id=trigger.trigger_id,
             agent_id=trigger.agent_id,
@@ -417,7 +425,7 @@ async def get_trigger(
             name=trigger.name,
             description=trigger.description,
             is_active=trigger.is_active,
-            webhook_url=webhook_url,
+            webhook_url=None,
             created_at=trigger.created_at.isoformat(),
             updated_at=trigger.updated_at.isoformat(),
             config=trigger.config
@@ -456,9 +464,6 @@ async def update_trigger(
         # Sync triggers to version config after update
         await sync_triggers_to_version_config(updated_trigger.agent_id)
         
-        base_url = os.getenv("WEBHOOK_BASE_URL", "http://localhost:8000")
-        webhook_url = f"{base_url}/api/triggers/{trigger_id}/webhook"
-
         return TriggerResponse(
             trigger_id=updated_trigger.trigger_id,
             agent_id=updated_trigger.agent_id,
@@ -467,7 +472,7 @@ async def update_trigger(
             name=updated_trigger.name,
             description=updated_trigger.description,
             is_active=updated_trigger.is_active,
-            webhook_url=webhook_url,
+            webhook_url=None,
             created_at=updated_trigger.created_at.isoformat(),
             updated_at=updated_trigger.updated_at.isoformat(),
             config=updated_trigger.config
@@ -509,6 +514,105 @@ async def delete_trigger(
         
     except Exception as e:
         logger.error(f"Error deleting trigger: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+class TriggerExecution(BaseModel):
+    """Represents a single trigger execution (agent run)"""
+    execution_id: str
+    thread_id: str
+    trigger_id: str
+    agent_id: str
+    status: str
+    started_at: str
+    completed_at: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+class TriggerExecutionHistoryResponse(BaseModel):
+    """Response for trigger execution history"""
+    executions: List[TriggerExecution]
+    total_count: int
+    next_run_time: Optional[str] = None
+    next_run_time_local: Optional[str] = None
+    timezone: Optional[str] = None
+    human_readable_schedule: Optional[str] = None
+
+
+@router.get("/{trigger_id}/executions", response_model=TriggerExecutionHistoryResponse)
+async def get_trigger_executions(
+    trigger_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    user_id: str = Depends(verify_and_get_user_id_from_jwt)
+):
+    """Get execution history for a trigger (past runs and next scheduled run)"""
+    
+    try:
+        trigger_service = get_trigger_service(db)
+        trigger = await trigger_service.get_trigger(trigger_id)
+        
+        if not trigger:
+            raise HTTPException(status_code=404, detail="Trigger not found")
+        
+        await verify_and_authorize_trigger_agent_access(trigger.agent_id, user_id)
+        
+        client = await db.client
+
+        runs_result = await client.table('agent_runs').select(
+            'id, thread_id, agent_id, status, created_at, completed_at, error, metadata'
+        ).eq(
+            'metadata->>trigger_id', trigger_id
+        ).order(
+            'created_at', desc=True
+        ).limit(limit).execute()
+        
+        executions = []
+        for run in runs_result.data or []:
+            executions.append(TriggerExecution(
+                execution_id=run['id'],
+                thread_id=run['thread_id'],
+                trigger_id=trigger_id,
+                agent_id=run['agent_id'],
+                status=run['status'],
+                started_at=run['created_at'],
+                completed_at=run.get('completed_at'),
+                error_message=run.get('error')
+            ))
+        
+        # Calculate next run time for scheduled triggers
+        next_run_time = None
+        next_run_time_local = None
+        user_timezone = None
+        human_readable = None
+        
+        if trigger.trigger_type == TriggerType.SCHEDULE and trigger.is_active:
+            cron_expression = trigger.config.get('cron_expression')
+            user_timezone = trigger.config.get('timezone', 'UTC')
+            
+            if cron_expression:
+                import pytz
+                next_run = get_next_run_time(cron_expression, user_timezone)
+                if next_run:
+                    next_run_time = next_run.isoformat()
+                    local_tz = pytz.timezone(user_timezone)
+                    next_run_local = next_run.astimezone(local_tz)
+                    next_run_time_local = next_run_local.isoformat()
+                
+                human_readable = get_human_readable_schedule(cron_expression, user_timezone)
+        
+        return TriggerExecutionHistoryResponse(
+            executions=executions,
+            total_count=len(executions),
+            next_run_time=next_run_time,
+            next_run_time_local=next_run_time_local,
+            timezone=user_timezone,
+            human_readable_schedule=human_readable
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting trigger executions: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

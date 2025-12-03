@@ -174,7 +174,8 @@ class AgentLoader:
         self, 
         agent_id: str, 
         user_id: str,
-        load_config: bool = True
+        load_config: bool = True,
+        skip_cache: bool = False
     ) -> AgentData:
         """
         Load a single agent with full configuration.
@@ -183,6 +184,7 @@ class AgentLoader:
             agent_id: Agent ID to load
             user_id: User ID for authorization
             load_config: Whether to load full version configuration
+            skip_cache: If True, bypass cache (for cache warm-up)
             
         Returns:
             AgentData with complete information
@@ -190,6 +192,17 @@ class AgentLoader:
         Raises:
             ValueError: If agent not found or access denied
         """
+        import time
+        t_start = time.time()
+        
+        # Check cache first (if loading config and not skipping cache)
+        if load_config and not skip_cache:
+            from core.runtime_cache import get_cached_agent_config
+            cached = await get_cached_agent_config(agent_id)
+            if cached:
+                logger.debug(f"⚡ Using cached config for agent {agent_id} ({(time.time() - t_start)*1000:.1f}ms)")
+                return self._dict_to_agent_data(cached)
+        
         client = await self.db.client
         
         # Fetch agent metadata
@@ -210,7 +223,17 @@ class AgentLoader:
         # Load configuration if requested
         if load_config and agent_row.get('current_version_id'):
             await self._load_agent_config(agent_data, user_id)
+            
+            # Cache the result
+            from core.runtime_cache import set_cached_agent_config
+            await set_cached_agent_config(
+                agent_id,
+                agent_data.to_dict(),
+                version_id=agent_row.get('current_version_id'),
+                is_suna_default=agent_data.is_suna_default
+            )
         
+        logger.debug(f"⏱️ load_agent completed in {(time.time() - t_start)*1000:.1f}ms")
         return agent_data
     
     async def load_agents_list(
@@ -305,6 +328,43 @@ class AgentLoader:
         
         return agent_data
     
+    def _dict_to_agent_data(self, data: Dict[str, Any]) -> AgentData:
+        """Convert cached dict back to AgentData."""
+        current_version = data.get('current_version', {}) or {}
+        
+        return AgentData(
+            agent_id=data['agent_id'],
+            name=data['name'],
+            description=data.get('description'),
+            account_id=data['account_id'],
+            is_default=data.get('is_default', False),
+            is_public=data.get('is_public', False),
+            tags=data.get('tags', []),
+            icon_name=data.get('icon_name'),
+            icon_color=data.get('icon_color'),
+            icon_background=data.get('icon_background'),
+            created_at=data.get('created_at', ''),
+            updated_at=data.get('updated_at', ''),
+            current_version_id=data.get('current_version_id'),
+            version_count=data.get('version_count', 1),
+            metadata=data.get('metadata', {}),
+            system_prompt=data.get('system_prompt'),
+            model=data.get('model'),
+            configured_mcps=data.get('configured_mcps', []),
+            custom_mcps=data.get('custom_mcps', []),
+            agentpress_tools=data.get('agentpress_tools', {}),
+            triggers=data.get('triggers', []),
+            version_name=data.get('version_name') or current_version.get('version_name'),
+            version_number=current_version.get('version_number'),
+            version_created_at=current_version.get('created_at'),
+            version_updated_at=current_version.get('updated_at'),
+            version_created_by=current_version.get('created_by'),
+            is_suna_default=data.get('is_suna_default', False),
+            centrally_managed=data.get('centrally_managed', False),
+            config_loaded=True,  # Cached data always has config
+            restrictions=data.get('restrictions', {})
+        )
+    
     def _row_to_agent_data(self, row: Dict[str, Any]) -> AgentData:
         """Convert database row to AgentData."""
         metadata = row.get('metadata', {}) or {}
@@ -332,31 +392,90 @@ class AgentLoader:
     async def _load_agent_config(self, agent: AgentData, user_id: str):
         """Load full configuration for a single agent."""
         if agent.is_suna_default:
-            self._load_suna_config(agent)
+            await self._load_suna_config(agent, user_id)
         else:
             await self._load_custom_config(agent, user_id)
         
         agent.config_loaded = True
     
-    def _load_suna_config(self, agent: AgentData):
-        """Load Suna central configuration."""
-        from core.suna_config import SUNA_CONFIG
-        from core.config_helper import _extract_agentpress_tools_for_run
+    async def _load_suna_config(self, agent: AgentData, user_id: Optional[str] = None):
+        """
+        Load Suna config using static in-memory config + cached user MCPs.
         
-        agent.system_prompt = SUNA_CONFIG['system_prompt']
-        agent.model = SUNA_CONFIG['model']
-        agent.agentpress_tools = _extract_agentpress_tools_for_run(SUNA_CONFIG['agentpress_tools'])
-        agent.configured_mcps = []
-        agent.custom_mcps = []
-        agent.triggers = []
-        agent.centrally_managed = True
-        agent.restrictions = {
-            'system_prompt_editable': False,
-            'tools_editable': False,
-            'name_editable': False,
-            'description_editable': False,
-            'mcps_editable': True
-        }
+        Static parts (prompt, model, tools) = instant from memory
+        User MCPs = check cache first, then DB if miss
+        """
+        import time
+        t_start = time.time()
+        
+        # 1. Load static config from memory (instant, no DB)
+        from core.runtime_cache import get_static_suna_config, load_static_suna_config
+        static_config = get_static_suna_config()
+        if not static_config:
+            static_config = load_static_suna_config()
+        
+        agent.system_prompt = static_config['system_prompt']
+        agent.model = static_config['model']
+        agent.agentpress_tools = static_config['agentpress_tools']
+        agent.centrally_managed = static_config['centrally_managed']
+        agent.restrictions = static_config['restrictions']
+        
+        # 2. Load user-specific MCPs (check cache first)
+        if agent.current_version_id and user_id:
+            from core.runtime_cache import get_cached_user_mcps, set_cached_user_mcps
+            
+            # Try cache first
+            cached_mcps = await get_cached_user_mcps(agent.agent_id)
+            if cached_mcps:
+                agent.configured_mcps = cached_mcps.get('configured_mcps', [])
+                agent.custom_mcps = cached_mcps.get('custom_mcps', [])
+                agent.triggers = cached_mcps.get('triggers', [])
+                logger.debug(f"⚡ Suna config loaded in {(time.time() - t_start)*1000:.1f}ms (MCPs from cache)")
+                return
+            
+            # Cache miss - fetch from DB
+            try:
+                from core.versioning.version_service import get_version_service
+                version_service = await get_version_service()
+                
+                version = await version_service.get_version(
+                    agent_id=agent.agent_id,
+                    version_id=agent.current_version_id,
+                    user_id=user_id
+                )
+                
+                version_dict = version.to_dict()
+                
+                if 'config' in version_dict and version_dict['config']:
+                    config = version_dict['config']
+                    tools = config.get('tools', {})
+                    agent.configured_mcps = tools.get('mcp', [])
+                    agent.custom_mcps = tools.get('custom_mcp', [])
+                    agent.triggers = config.get('triggers', [])
+                else:
+                    agent.configured_mcps = version_dict.get('configured_mcps', [])
+                    agent.custom_mcps = version_dict.get('custom_mcps', [])
+                    agent.triggers = []
+                
+                # Cache for next time
+                await set_cached_user_mcps(
+                    agent.agent_id,
+                    agent.configured_mcps,
+                    agent.custom_mcps,
+                    agent.triggers
+                )
+                
+                logger.debug(f"Suna config loaded in {(time.time() - t_start)*1000:.1f}ms (MCPs from DB, now cached)")
+            except Exception as e:
+                logger.warning(f"Failed to load MCPs for Suna agent {agent.agent_id}: {e}")
+                agent.configured_mcps = []
+                agent.custom_mcps = []
+                agent.triggers = []
+        else:
+            agent.configured_mcps = []
+            agent.custom_mcps = []
+            agent.triggers = []
+            logger.debug(f"⚡ Suna config loaded in {(time.time() - t_start)*1000:.1f}ms (no MCPs)")
     
     async def _load_custom_config(self, agent: AgentData, user_id: str):
         """Load custom agent configuration from version."""
@@ -430,31 +549,43 @@ class AgentLoader:
     
     async def _batch_load_configs(self, agents: list[AgentData]):
         """Batch load configurations for multiple agents."""
-        from core.utils.query_utils import batch_query_in
         
-        # Get all version IDs
+        # Get all version IDs for non-Suna agents
         version_ids = [a.current_version_id for a in agents if a.current_version_id and not a.is_suna_default]
         
         if not version_ids:
+            # Only Suna agents, load their configs
+            for agent in agents:
+                if agent.is_suna_default:
+                    await self._load_suna_config(agent, agent.account_id)
+                    agent.config_loaded = True
             return
         
         try:
-            client = await self.db.client
-            versions_data = await batch_query_in(
-                client=client,
-                table_name='agent_versions',
-                select_fields='version_id, agent_id, version_number, version_name, config',
-                in_field='version_id',
-                in_values=version_ids
-            )
+            # Use versioning service instead of direct config access
+            from core.versioning.version_service import get_version_service
+            version_service = await get_version_service()
             
-            # Create version map
-            version_map = {v['agent_id']: v for v in versions_data}
+            # Create version map using versioning service
+            version_map = {}
+            for agent in agents:
+                if agent.current_version_id and not agent.is_suna_default:
+                    try:
+                        version = await version_service.get_version(
+                            agent_id=agent.agent_id,
+                            version_id=agent.current_version_id,
+                            user_id=agent.account_id
+                        )
+                        if version:
+                            version_map[agent.agent_id] = version.to_dict()
+                    except Exception as e:
+                        logger.warning(f"Failed to load version {agent.current_version_id} for agent {agent.agent_id}: {e}")
+                        continue
             
             # Apply configs
             for agent in agents:
                 if agent.is_suna_default:
-                    self._load_suna_config(agent)
+                    await self._load_suna_config(agent, agent.account_id)
                     agent.config_loaded = True
                 elif agent.agent_id in version_map:
                     self._apply_version_config(agent, version_map[agent.agent_id])
@@ -463,6 +594,11 @@ class AgentLoader:
                 
         except Exception as e:
             logger.warning(f"Failed to batch load agent configs: {e}")
+            # Fallback: load Suna configs only
+            for agent in agents:
+                if agent.is_suna_default:
+                    await self._load_suna_config(agent, agent.account_id)
+                    agent.config_loaded = True
     
     def _apply_version_config(self, agent: AgentData, version_row: Dict[str, Any]):
         """Apply version configuration to agent."""

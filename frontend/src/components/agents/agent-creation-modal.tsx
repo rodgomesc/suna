@@ -1,25 +1,24 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Bot, FileEdit, Globe } from 'lucide-react';
+import { Globe, Wrench, MessageSquare, ChevronLeft } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
-  DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { useCreateNewAgent } from '@/hooks/react-query/agents/use-agents';
-import { useKortixTeamTemplates } from '@/hooks/react-query/secure-mcp/use-secure-mcp';
-import { AgentCountLimitError } from '@/lib/api';
+import { useCreateNewAgent } from '@/hooks/agents/use-agents';
+import { useKortixTeamTemplates } from '@/hooks/secure-mcp/use-secure-mcp';
+import { AgentCountLimitError } from '@/lib/api/errors';
 import { toast } from 'sonner';
-import { AgentCountLimitDialog } from './agent-count-limit-dialog';
-import { UnifiedAgentCard } from '@/components/ui/unified-agent-card';
 import type { BaseAgentData } from '@/components/ui/unified-agent-card';
 import type { MarketplaceTemplate } from './installation/types';
 import { MarketplaceAgentPreviewDialog } from './marketplace-agent-preview-dialog';
-import { Skeleton } from '@/components/ui/skeleton';
 import { useRouter } from 'next/navigation';
+import { KortixLogo } from '@/components/sidebar/kortix-logo';
+import { Textarea } from '@/components/ui/textarea';
+import { cn } from '@/lib/utils';
 
 interface AgentCreationModalProps {
   open: boolean;
@@ -27,35 +26,38 @@ interface AgentCreationModalProps {
   onSuccess?: (agentId: string) => void;
 }
 
+const creationOptions = [
+  { 
+    id: 'scratch' as const, 
+    icon: Wrench, 
+    label: 'Configure Manually',
+    description: 'Full control over every setting'
+  },
+  { 
+    id: 'chat' as const, 
+    icon: MessageSquare, 
+    label: 'Configure by Chat',
+    description: 'Let AI set it up for you'
+  },
+  { 
+    id: 'template' as const, 
+    icon: Globe, 
+    label: 'Explore Templates',
+    description: 'Start from a pre-built worker'
+  }
+];
+
 export function AgentCreationModal({ open, onOpenChange, onSuccess }: AgentCreationModalProps) {
   const router = useRouter();
-  const [showAgentLimitDialog, setShowAgentLimitDialog] = useState(false);
-  const [agentLimitError, setAgentLimitError] = useState<any>(null);
   const [selectedTemplate, setSelectedTemplate] = useState<MarketplaceTemplate | null>(null);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [selectedOption, setSelectedOption] = useState<'scratch' | 'chat' | 'template' | null>(null);
+  const [showChatStep, setShowChatStep] = useState(false);
+  const [chatDescription, setChatDescription] = useState('');
 
   const createNewAgentMutation = useCreateNewAgent();
-  const { data: templates, isLoading } = useKortixTeamTemplates();
-
-  const displayTemplates = templates?.templates?.slice(0, 6) || [];
-
-  const handleCreateFromScratch = () => {
-    createNewAgentMutation.mutate(undefined, {
-      onSuccess: (newAgent) => {
-        onOpenChange(false);
-        onSuccess?.(newAgent.agent_id);
-      },
-      onError: (error) => {
-        if (error instanceof AgentCountLimitError) {
-          setAgentLimitError(error.detail);
-          setShowAgentLimitDialog(true);
-          onOpenChange(false);
-        } else {
-          toast.error(error instanceof Error ? error.message : 'Failed to create agent');
-        }
-      }
-    });
-  };
+  // Only fetch templates when modal is open to avoid unnecessary API calls
+  const { data: templates } = useKortixTeamTemplates({ enabled: open });
 
   const handleExploreTemplates = () => {
     onOpenChange(false);
@@ -113,57 +115,209 @@ export function AgentCreationModal({ open, onOpenChange, onSuccess }: AgentCreat
     onOpenChange(false);
   };
 
+  const handleOptionClick = (option: 'scratch' | 'chat' | 'template') => {
+    setSelectedOption(option);
+
+    // Navigate immediately based on selection
+    if (option === 'scratch') {
+      // Create agent and redirect to its config screen
+      createNewAgentMutation.mutate(undefined, {
+        onSuccess: (newAgent) => {
+          onOpenChange(false);
+          router.push(`/agents/config/${newAgent.agent_id}`);
+        },
+        onError: (error) => {
+          if (error instanceof AgentCountLimitError) {
+            onOpenChange(false);
+          } else {
+            toast.error(error instanceof Error ? error.message : 'Failed to create agent');
+          }
+        }
+      });
+    } else if (option === 'chat') {
+      // Show chat configuration step
+      setShowChatStep(true);
+    } else if (option === 'template') {
+      // Open templates tab
+      handleExploreTemplates();
+    }
+  };
+
+  const handleChatContinue = async () => {
+    if (!chatDescription.trim()) {
+      toast.error('Please describe what your Worker should be able to do');
+      return;
+    }
+
+    try {
+      const { setupAgentFromChat } = await import('@/lib/api/agents');
+
+      toast.loading('Creating your worker with AI...', { id: 'agent-setup' });
+
+      const result = await setupAgentFromChat({
+        description: chatDescription
+      });
+
+      toast.success(`Created "${result.name}"!`, { id: 'agent-setup' });
+      onOpenChange(false);
+      router.push(`/agents/config/${result.agent_id}`);
+
+    } catch (error: any) {
+      toast.error('Failed to create agent', { id: 'agent-setup' });
+      if (error?.detail?.error_code === 'AGENT_LIMIT_EXCEEDED') {
+        onOpenChange(false);
+      } else {
+        console.error('Error creating agent from chat:', error);
+      }
+    }
+  };
+
+  const handleBack = () => {
+    setShowChatStep(false);
+    setSelectedOption(null);
+    setChatDescription('');
+  };
+
+  const handleModalClose = (isOpen: boolean) => {
+    if (!isOpen) {
+      // Reset state when closing
+      setShowChatStep(false);
+      setSelectedOption(null);
+      setChatDescription('');
+    }
+    onOpenChange(isOpen);
+  };
+
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>What would you like to automate?</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-6 py-4">
-            {isLoading ? (
-              <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
-                {[1, 2, 3, 4, 5, 6].map((i) => (
-                  <div key={i} className="bg-muted/30 rounded-3xl p-4 h-auto w-full flex items-center">
-                    <Skeleton className="w-12 h-12 rounded-xl" />
-                    <Skeleton className="h-6 w-1/2 ml-4" />
-                  </div>
-                ))}
+      <Dialog open={open} onOpenChange={handleModalClose}>
+        <DialogContent className="sm:max-w-xl p-0 gap-0 overflow-hidden max-h-[90vh] sm:max-h-[85vh]" hideCloseButton>
+          {!showChatStep ? (
+            <div className="p-5 sm:p-8">
+              {/* Logo & Header */}
+              <div className="flex flex-col items-center text-center mb-6 sm:mb-8">
+                <div className="mb-3 sm:mb-4 p-2.5 sm:p-3 rounded-xl sm:rounded-2xl bg-muted/50">
+                  <KortixLogo size={28} variant="symbol" className="sm:hidden" />
+                  <KortixLogo size={36} variant="symbol" className="hidden sm:block" />
+                </div>
+                <DialogTitle className="text-xl sm:text-2xl font-semibold text-foreground">
+                  Create a new Worker
+                </DialogTitle>
+                <p className="text-xs sm:text-sm text-muted-foreground mt-1.5 sm:mt-2 max-w-sm">
+                  Choose how you&apos;d like to set up your new worker
+                </p>
               </div>
-            ) : (
-              <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
-                {displayTemplates.map((template) => (
-                  <UnifiedAgentCard
-                    key={template.template_id}
-                    variant="compact"
-                    data={convertTemplateToAgentData(template)}
-                    actions={{
-                      onClick: () => handleCardClick(template)
-                    }}
-                  />
-                ))}
+
+              {/* Options */}
+              <div className="flex flex-col gap-2.5 sm:gap-3">
+                {creationOptions.map((option) => {
+                  const Icon = option.icon;
+                  const isSelected = selectedOption === option.id;
+                  const isLoading = createNewAgentMutation.isPending && selectedOption === option.id;
+                  
+                  return (
+                    <button
+                      key={option.id}
+                      onClick={() => handleOptionClick(option.id)}
+                      disabled={createNewAgentMutation.isPending}
+                      className={cn(
+                        "w-full p-3.5 sm:p-4 rounded-xl sm:rounded-2xl border transition-all text-left",
+                        "flex items-center gap-3 sm:gap-4",
+                        isSelected
+                          ? "border-primary bg-primary/5"
+                          : "border-border bg-card hover:border-muted-foreground/30 hover:bg-muted/30",
+                        "disabled:opacity-50 disabled:cursor-not-allowed"
+                      )}
+                    >
+                      <div className={cn(
+                        "flex items-center justify-center w-10 h-10 sm:w-12 sm:h-12 rounded-lg sm:rounded-xl flex-shrink-0",
+                        isSelected ? "bg-primary/10" : "bg-muted/60"
+                      )}>
+                        <Icon className={cn(
+                          "h-5 w-5 sm:h-6 sm:w-6",
+                          isSelected ? "text-primary" : "text-muted-foreground"
+                        )} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={cn(
+                            "text-sm sm:text-base font-medium",
+                            isSelected ? "text-primary" : "text-foreground"
+                          )}>
+                            {option.label}
+                          </span>
+                          {isLoading && (
+                            <div className="w-3.5 h-3.5 sm:w-4 sm:h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                          )}
+                        </div>
+                        <p className="text-xs sm:text-sm text-muted-foreground mt-0.5">
+                          {option.description}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
-            )}
-            <div className="flex items-center justify-start gap-3 pt-4">
-              <Button
-                variant="default"
-                onClick={handleCreateFromScratch}
-                disabled={createNewAgentMutation.isPending}
-                className="gap-2"
-              >
-                <Bot className="h-4 w-4" />
-                Create from scratch
-              </Button>
-              <Button
-                variant="outline"
-                onClick={handleExploreTemplates}
-                className="gap-2"
-              >
-                <Globe className="h-4 w-4" />
-                Explore templates
-              </Button>
+
+              {/* Cancel button */}
+              <div className="mt-5 sm:mt-6">
+                <Button 
+                  variant="ghost" 
+                  onClick={() => handleModalClose(false)} 
+                  className="w-full h-9 sm:h-10 text-sm text-muted-foreground"
+                >
+                  Cancel
+                </Button>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="p-5 sm:p-8 overflow-y-auto max-h-[85vh] sm:max-h-none">
+              {/* Logo & Header */}
+              <div className="flex flex-col items-center text-center mb-5 sm:mb-6">
+                <div className="mb-3 sm:mb-4 p-2.5 sm:p-3 rounded-xl sm:rounded-2xl bg-muted/50">
+                  <KortixLogo size={28} variant="symbol" className="sm:hidden" />
+                  <KortixLogo size={36} variant="symbol" className="hidden sm:block" />
+                </div>
+                <DialogTitle className="text-xl sm:text-2xl font-semibold text-foreground">
+                  Describe your Worker
+                </DialogTitle>
+                <p className="text-xs sm:text-sm text-muted-foreground mt-1.5 sm:mt-2 max-w-sm">
+                  Tell us what your worker should be able to do
+                </p>
+              </div>
+
+              {/* Textarea */}
+              <div className="mb-4 sm:mb-6">
+                <Textarea
+                  value={chatDescription}
+                  onChange={(e) => setChatDescription(e.target.value)}
+                  placeholder="e.g., A worker that monitors competitor prices and sends me daily reports..."
+                  className="min-h-[120px] sm:min-h-[160px] resize-none text-sm sm:text-base"
+                  autoFocus
+                />
+              </div>
+
+              {/* Actions */}
+              <div className="flex flex-col gap-2 sm:gap-3">
+                <Button
+                  onClick={handleChatContinue}
+                  disabled={!chatDescription.trim() || createNewAgentMutation.isPending}
+                  className="w-full h-9 sm:h-10 text-sm"
+                >
+                  {createNewAgentMutation.isPending ? 'Creating...' : 'Create Worker'}
+                </Button>
+                <Button 
+                  variant="ghost" 
+                  onClick={handleBack} 
+                  disabled={createNewAgentMutation.isPending}
+                  className="w-full h-9 sm:h-10 text-sm text-muted-foreground"
+                >
+                  <ChevronLeft className="w-4 h-4 mr-1" />
+                  Back
+                </Button>
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 
@@ -177,16 +331,6 @@ export function AgentCreationModal({ open, onOpenChange, onSuccess }: AgentCreat
         onInstall={handlePreviewInstall}
         isInstalling={false}
       />
-
-      {showAgentLimitDialog && agentLimitError && (
-        <AgentCountLimitDialog
-          open={showAgentLimitDialog}
-          onOpenChange={setShowAgentLimitDialog}
-          currentCount={agentLimitError.current_count}
-          limit={agentLimitError.limit}
-          tierName={agentLimitError.tier_name}
-        />
-      )}
     </>
   );
 }

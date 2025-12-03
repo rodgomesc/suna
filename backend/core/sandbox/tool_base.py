@@ -24,6 +24,7 @@ class SandboxToolsBase(Tool):
         self._sandbox = None
         self._sandbox_id = None
         self._sandbox_pass = None
+        self._sandbox_url = None
 
     async def _ensure_sandbox(self) -> AsyncSandbox:
         """Ensure we have a valid sandbox instance, retrieving it from the project if needed.
@@ -51,9 +52,8 @@ class SandboxToolsBase(Tool):
                     sandbox_obj = await create_sandbox(sandbox_pass, self.project_id)
                     sandbox_id = sandbox_obj.id
                     
-                    # Wait 5 seconds for services to start up
-                    logger.info(f"Waiting 5 seconds for sandbox {sandbox_id} services to initialize...")
-                    await asyncio.sleep(5)
+                    logger.info(f"Waiting 2 seconds for sandbox {sandbox_id} services to initialize...")
+                    await asyncio.sleep(2)
                     
                     # Gather preview links and token (best-effort parsing)
                     try:
@@ -88,14 +88,31 @@ class SandboxToolsBase(Tool):
                             logger.error(f"Failed to delete sandbox {sandbox_id} after DB update failure", exc_info=True)
                         raise Exception("Database update failed when storing sandbox metadata")
 
+                    # Update project metadata cache with sandbox data (instead of invalidate)
+                    try:
+                        from core.runtime_cache import set_cached_project_metadata
+                        sandbox_cache_data = {
+                            'id': sandbox_id,
+                            'pass': sandbox_pass,
+                            'vnc_preview': vnc_url,
+                            'sandbox_url': website_url,
+                            'token': token
+                        }
+                        await set_cached_project_metadata(self.project_id, sandbox_cache_data)
+                        logger.debug(f"✅ Updated project cache with sandbox data: {self.project_id}")
+                    except Exception as cache_error:
+                        logger.warning(f"Failed to update project cache: {cache_error}")
+
                     # Store local metadata and ensure sandbox is ready
                     self._sandbox_id = sandbox_id
                     self._sandbox_pass = sandbox_pass
+                    self._sandbox_url = website_url
                     self._sandbox = await get_or_start_sandbox(self._sandbox_id)
                 else:
                     # Use existing sandbox metadata
                     self._sandbox_id = sandbox_info['id']
                     self._sandbox_pass = sandbox_info.get('pass')
+                    self._sandbox_url = sandbox_info.get('sandbox_url')
                     self._sandbox = await get_or_start_sandbox(self._sandbox_id)
 
             except Exception as e:
@@ -117,6 +134,13 @@ class SandboxToolsBase(Tool):
         if self._sandbox_id is None:
             raise RuntimeError("Sandbox ID not initialized. Call _ensure_sandbox() first.")
         return self._sandbox_id
+
+    @property
+    def sandbox_url(self) -> str:
+        """Get the sandbox URL, ensuring it exists."""
+        if self._sandbox_url is None:
+            raise RuntimeError("Sandbox URL not initialized. Call _ensure_sandbox() first.")
+        return self._sandbox_url
 
     def clean_path(self, path: str) -> str:
         """Clean and normalize a path to be relative to /workspace."""

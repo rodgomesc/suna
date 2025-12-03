@@ -5,11 +5,14 @@ import { useTheme } from 'next-themes';
 import { toast } from 'sonner';
 import { Icons } from './home/icons';
 // Using proper GitHub brand icon from Icons component
-import { useAuthMethodTracking } from '@/lib/stores/auth-tracking';
+import { useAuthMethodTracking } from '@/stores/auth-tracking';
 import { Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { useTranslations } from 'next-intl';
 
 interface GitHubSignInProps {
   returnUrl?: string;
+  referralCode?: string;
 }
 
 interface AuthMessage {
@@ -18,10 +21,11 @@ interface AuthMessage {
   returnUrl?: string;
 }
 
-export default function GitHubSignIn({ returnUrl }: GitHubSignInProps) {
+export default function GitHubSignIn({ returnUrl, referralCode }: GitHubSignInProps) {
   const [isLoading, setIsLoading] = useState(false);
   const { resolvedTheme } = useTheme();
-  
+  const t = useTranslations('auth');
+
   const { wasLastMethod, markAsUsed } = useAuthMethodTracking('github');
 
   const cleanupAuthState = useCallback(() => {
@@ -100,6 +104,10 @@ export default function GitHubSignIn({ returnUrl }: GitHubSignInProps) {
       if (returnUrl) {
         sessionStorage.setItem('github-returnUrl', returnUrl || '/dashboard');
       }
+      
+      if (referralCode) {
+        document.cookie = `pending-referral-code=${referralCode.trim().toUpperCase()}; path=/; max-age=600; SameSite=Lax`;
+      }
 
       const popup = window.open(
         `${window.location.origin}/auth/github-popup`,
@@ -146,25 +154,27 @@ export default function GitHubSignIn({ returnUrl }: GitHubSignInProps) {
 
   return (
     <div className="relative">
-      <button
+      <Button
         onClick={handleGitHubSignIn}
         disabled={isLoading}
-        className="w-full h-12 flex items-center justify-center text-sm font-medium tracking-wide rounded-full bg-background text-foreground border border-border hover:bg-accent/30 transition-all duration-200 disabled:opacity-60 disabled:cursor-not-allowed font-sans"
+        variant="outline"
+        size="lg"
+        className="w-full h-12"
         aria-label={
           isLoading ? 'Signing in with GitHub...' : 'Sign in with GitHub'
         }
         type="button"
       >
         {isLoading ? (
-          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+          <Loader2 className="w-4 h-4 animate-spin" />
         ) : (
-          <Icons.github className="w-4 h-4 mr-2" />
+          <Icons.github className="w-4 h-4" />
         )}
-        <span className="font-medium">
-          {isLoading ? 'Signing in...' : 'Continue with GitHub'}
+        <span>
+          {isLoading ? t('signingIn') : t('continueWithGitHub')}
         </span>
-      </button>
-      
+      </Button>
+
       {wasLastMethod && (
         <div className="absolute -top-1 -right-1 w-3 h-3 bg-green-500 rounded-full border-2 border-background shadow-sm">
           <div className="w-full h-full bg-green-500 rounded-full animate-pulse" />

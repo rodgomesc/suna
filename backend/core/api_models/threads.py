@@ -4,16 +4,11 @@ from pydantic import BaseModel
 from typing import Optional
 
 
-class AgentStartRequest(BaseModel):
-    """Request model for starting an agent."""
-    model_name: Optional[str] = None  # Will be set to default model in the endpoint
-    agent_id: Optional[str] = None  # Custom agent to use
-
-
-class InitiateAgentResponse(BaseModel):
-    """Response model for agent initiation."""
+class UnifiedAgentStartResponse(BaseModel):
+    """Unified response model for agent start (both new and existing threads)."""
     thread_id: str
-    agent_run_id: Optional[str] = None
+    agent_run_id: str
+    status: str = "running"
 
 
 class CreateThreadResponse(BaseModel):
@@ -27,3 +22,22 @@ class MessageCreateRequest(BaseModel):
     type: str
     content: str
     is_llm_message: bool = True
+
+
+class MessageFeedbackRequest(BaseModel):
+    """Request model for submitting message feedback."""
+    rating: float
+    feedback_text: Optional[str] = None
+    help_improve: bool = True
+
+
+class MessageFeedbackResponse(BaseModel):
+    """Response model for message feedback."""
+    feedback_id: str
+    thread_id: str
+    message_id: str
+    rating: float
+    feedback_text: Optional[str] = None
+    help_improve: bool
+    created_at: str
+    updated_at: str

@@ -22,14 +22,20 @@ import { Separator } from "@/components/ui/separator";
 import { extractConfigureProfileForAgentData } from './_utils';
 
 export function ConfigureProfileForAgentToolView({
-  name = 'configure-profile-for-agent',
-  assistantContent,
-  toolContent,
+  toolCall,
+  toolResult,
   assistantTimestamp,
   toolTimestamp,
   isSuccess = true,
   isStreaming = false,
 }: ToolViewProps) {
+  // Defensive check
+  if (!toolCall) {
+    return null;
+  }
+
+  const name = toolCall.function_name.replace(/_/g, '-').toLowerCase();
+  const toolTitle = getToolTitle(name);
 
   const {
     enabled_tools,
@@ -42,14 +48,12 @@ export function ConfigureProfileForAgentToolView({
     actualToolTimestamp,
     actualAssistantTimestamp
   } = extractConfigureProfileForAgentData(
-    assistantContent,
-    toolContent,
+    toolCall,
+    toolResult,
     isSuccess,
     toolTimestamp,
     assistantTimestamp
   );
-
-  const toolTitle = getToolTitle(name);
 
   const formatToolName = (toolName: string) => {
     return toolName
@@ -135,7 +139,7 @@ export function ConfigureProfileForAgentToolView({
                 <Separator />
 
                 <div className="text-center">
-                  <div className="text-3xl font-bold text-zinc-900 dark:text-zinc-100">
+                  <div className="text-3xl font-medium text-zinc-900 dark:text-zinc-100">
                     {total_tools}
                   </div>
                   <p className="text-sm text-zinc-500 dark:text-zinc-400">

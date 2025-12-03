@@ -1,11 +1,13 @@
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 from core.services.supabase import DBConnection
 from core.utils.logger import logger
 from core.utils.cache import Cache
 from core.utils.config import config, EnvMode
-from core.billing.config import FREE_TIER_INITIAL_CREDITS, TRIAL_ENABLED
+from core.billing.shared.config import FREE_TIER_INITIAL_CREDITS, TRIAL_ENABLED, get_tier_by_name
+from core.utils.distributed_lock import DistributedLock
+import asyncio
 
 class CreditService:
     def __init__(self):
@@ -19,13 +21,103 @@ class CreditService:
             self._client = await self.db.client
         return self._client
     
+    async def check_and_refresh_daily_credits(self, user_id: str) -> Tuple[bool, Decimal]:
+        try:
+            client = await self._get_client()
+            
+            account_result = await client.from_('credit_accounts').select('tier, last_daily_refresh').eq('account_id', user_id).execute()
+            
+            if not account_result.data or len(account_result.data) == 0:
+                return False, Decimal('0')
+            
+            account = account_result.data[0]
+            tier_name = account.get('tier', 'free')
+            
+            tier = get_tier_by_name(tier_name)
+            if not tier:
+                return False, Decimal('0')
+            
+            daily_config = tier.daily_credit_config
+            if not daily_config or not daily_config.get('enabled'):
+                return False, Decimal('0')
+            
+            credit_amount = daily_config.get('amount', Decimal('0'))
+            refresh_interval_hours = daily_config.get('refresh_interval_hours', 24)
+            
+            today = datetime.now(timezone.utc).date().isoformat()
+            lock_key = f"daily_refresh:{user_id}:{today}"
+            lock = DistributedLock(lock_key, timeout_seconds=60)
+            
+            acquired = await lock.acquire(wait=True, wait_timeout=30)
+            if not acquired:
+                logger.warning(f"[DAILY REFRESH] Failed to acquire lock for {user_id} on {today}")
+                return False, Decimal('0')
+            
+            try:
+                logger.info(f"[DAILY REFRESH] 🔒 Acquired lock for {user_id} on {today}")
+                
+                result = await client.rpc('atomic_daily_credit_refresh', {
+                    'p_account_id': user_id,
+                    'p_credit_amount': str(credit_amount),
+                    'p_tier': tier_name,
+                    'p_processed_by': 'api_request',
+                    'p_refresh_interval_hours': refresh_interval_hours
+                }).execute()
+                
+                if not result.data:
+                    logger.error(f"[DAILY REFRESH] No data returned from atomic function for {user_id}")
+                    return False, Decimal('0')
+                
+                response = result.data
+                
+                if response.get('duplicate_prevented'):
+                    reason = response.get('reason', 'unknown')
+                    logger.warning(
+                        f"[DAILY REFRESH] ⛔ Duplicate prevented for {user_id} on {today}\n"
+                        f"Reason: {reason}"
+                    )
+                    return False, Decimal('0')
+                
+                if response.get('success'):
+                    credits_granted = Decimal(str(response.get('credits_granted', 0)))
+                    new_balance = Decimal(str(response.get('new_balance', 0)))
+                    old_expiring = Decimal(str(response.get('old_expiring', 0)))
+                    
+                    logger.info(
+                        f"[DAILY REFRESH] ✅ Granted ${credits_granted} to {user_id}\n"
+                        f"Tier: {tier_name}, Interval: {refresh_interval_hours}h\n"
+                        f"Old expiring: ${old_expiring}, New balance: ${new_balance}"
+                    )
+                    
+                    if self.cache:
+                        await self.cache.invalidate(f"credit_balance:{user_id}")
+                        await self.cache.invalidate(f"credit_summary:{user_id}")
+                    
+                    return True, credits_granted
+                else:
+                    reason = response.get('reason', 'unknown')
+                    logger.info(f"[DAILY REFRESH] Not refreshed for {user_id}: {reason}")
+                    return False, Decimal('0')
+                    
+            finally:
+                await lock.release()
+                logger.info(f"[DAILY REFRESH] 🔓 Released lock for {user_id} on {today}")
+                
+        except Exception as e:
+            logger.error(f"[DAILY REFRESH] Failed for user {user_id}: {e}")
+            return False, Decimal('0')
+    
     async def get_balance(self, user_id: str, use_cache: bool = True) -> Decimal:
         cache_key = f"credit_balance:{user_id}"
         
         if use_cache and self.cache:
             cached = await self.cache.get(cache_key)
-            if cached:
-                return Decimal(cached)
+            if cached is not None:
+                if isinstance(cached, (str, int, float)):
+                    return Decimal(str(cached))
+                else:
+                    logger.warning(f"Invalid cache entry for {cache_key}: expected str/int/float, got {type(cached)}")
+                    await self.cache.invalidate(cache_key)
         
         try:
             client = await self._get_client()
@@ -63,56 +155,33 @@ class CreditService:
                     'balance_after': '0'
                 }).execute()
             else:
-                trial_mode = TRIAL_ENABLED
-                logger.info(f"Creating new user {user_id} with free tier (trial migration will handle conversion)")
+                logger.info(f"Creating new user {user_id} - will auto-subscribe to free tier")
                 
-                if trial_mode == TRIAL_ENABLED:
-                    account_data = {
-                        'account_id': user_id,
-                        'balance': str(FREE_TIER_INITIAL_CREDITS),
-                        'tier': 'free'
-                    }
+                account_data = {
+                    'account_id': user_id,
+                    'balance': '0',
+                    'tier': 'none',
+                    'trial_status': 'none'
+                }
+                
+                try:
+                    logger.info(f"Creating account for new user {user_id} with tier='none'")
                     
                     try:
-                        logger.info(f"Creating FREE TIER account for new user {user_id}")
-                        
-                        try:
-                            test_data = {**account_data, 'last_grant_date': datetime.now(timezone.utc).isoformat()}
-                            await client.from_('credit_accounts').insert(test_data).execute()
-                            logger.info(f"Successfully created FREE TIER account for user {user_id}")
-                        except Exception as e1:
-                            logger.warning(f"Creating account without last_grant_date: {e1}")
-                            await client.from_('credit_accounts').insert(account_data).execute()
-                            logger.info(f"Successfully created minimal FREE TIER account for user {user_id}")
-                            
-                    except Exception as e:
-                        logger.error(f"Failed to create FREE TIER account for user {user_id}: {e}")
-                        raise
-                    
-                    balance = FREE_TIER_INITIAL_CREDITS
-                    
-                    await client.from_('credit_ledger').insert({
-                        'account_id': user_id,
-                        'amount': str(FREE_TIER_INITIAL_CREDITS),
-                        'type': 'tier_grant',
-                        'description': 'Welcome to Suna! Free tier initial credits',
-                        'balance_after': str(FREE_TIER_INITIAL_CREDITS)
-                    }).execute()
-                else:
-                    account_data = {
-                        'account_id': user_id,
-                        'balance': '0',
-                        'tier': 'free'
-                    }
-                    try:
-                        logger.info(f"Creating TRIAL PENDING account for new user {user_id}")
+                        test_data = {**account_data, 'last_grant_date': datetime.now(timezone.utc).isoformat()}
+                        await client.from_('credit_accounts').insert(test_data).execute()
+                        logger.info(f"Successfully created account for user {user_id}")
+                    except Exception as e1:
+                        logger.warning(f"Creating account without last_grant_date: {e1}")
                         await client.from_('credit_accounts').insert(account_data).execute()
-                        logger.info(f"Successfully created TRIAL PENDING account for user {user_id}")
-                    except Exception as e:
-                        logger.error(f"Failed to create TRIAL PENDING account for user {user_id}: {e}")
-                        raise
+                        logger.info(f"Successfully created minimal account for user {user_id}")
                     
-                    balance = Decimal('0')
+                        
+                except Exception as e:
+                    logger.error(f"Failed to create account for user {user_id}: {e}")
+                    raise
+                
+                balance = Decimal('0')
         
         if self.cache:
             await self.cache.set(cache_key, str(balance), ttl=300)
@@ -198,7 +267,7 @@ class CreditService:
     
     async def grant_tier_credits(self, user_id: str, price_id: str, tier_name: str) -> bool:
         try:
-            from billing.config import get_tier_by_price_id
+            from core.billing.shared.config import get_tier_by_price_id
             tier = get_tier_by_price_id(price_id)
             
             if not tier:

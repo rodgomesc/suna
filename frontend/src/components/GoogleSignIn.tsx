@@ -5,24 +5,32 @@ import { createClient } from '@/lib/supabase/client';
 import { toast } from 'sonner';
 import { Icons } from './home/icons';
 import { Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { useTranslations } from 'next-intl';
 
 interface GoogleSignInProps {
   returnUrl?: string;
+  referralCode?: string;
 }
 
-export default function GoogleSignIn({ returnUrl }: GoogleSignInProps) {
+export default function GoogleSignIn({ returnUrl, referralCode }: GoogleSignInProps) {
   const [isLoading, setIsLoading] = useState(false);
   const supabase = createClient();
+  const t = useTranslations('auth');
 
   const handleGoogleSignIn = async () => {
     try {
       setIsLoading(true);
+      
+      if (referralCode) {
+        document.cookie = `pending-referral-code=${referralCode.trim().toUpperCase()}; path=/; max-age=600; SameSite=Lax`;
+      }
+      
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          redirectTo: `${window.location.origin}/auth/callback${
-            returnUrl ? `?returnUrl=${encodeURIComponent(returnUrl)}` : ''
-          }`,
+          redirectTo: `${window.location.origin}/auth/callback${returnUrl ? `?returnUrl=${encodeURIComponent(returnUrl)}` : ''
+            }`,
         },
       });
 
@@ -37,20 +45,22 @@ export default function GoogleSignIn({ returnUrl }: GoogleSignInProps) {
   };
 
   return (
-    <button
+    <Button
       onClick={handleGoogleSignIn}
       disabled={isLoading}
-      className="w-full h-12 flex items-center justify-center text-sm font-medium tracking-wide rounded-full bg-background text-foreground border border-border hover:bg-accent/30 transition-all duration-200 disabled:opacity-60 disabled:cursor-not-allowed font-sans"
+      variant="outline"
+      size="lg"
+      className="w-full h-12"
       type="button"
     >
       {isLoading ? (
-        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+        <Loader2 className="w-4 h-4 animate-spin" />
       ) : (
-        <Icons.google className="w-4 h-4 mr-2" />
+        <Icons.google className="w-4 h-4" />
       )}
-      <span className="font-medium">
-        {isLoading ? 'Signing in...' : 'Continue with Google'}
+      <span>
+        {isLoading ? t('signingIn') : t('continueWithGoogle')}
       </span>
-    </button>
+    </Button>
   );
 }

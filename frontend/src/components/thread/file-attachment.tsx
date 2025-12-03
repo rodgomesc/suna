@@ -18,9 +18,11 @@ import {
     DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu';
 
-import { useFileContent, useImageContent } from '@/hooks/react-query/files';
+import { useFileContent, useImageContent } from '@/hooks/files';
 import { useAuth } from '@/components/AuthProvider';
-import { Project } from '@/lib/api';
+import { Project } from '@/lib/api/threads';
+import { PresentationSlidePreview } from '@/components/thread/tool-views/presentation-tools/PresentationSlidePreview';
+import { usePresentationViewerStore } from '@/stores/presentation-viewer-store';
 
 // Define basic file types
 export type FileType =
@@ -29,6 +31,31 @@ export type FileType =
     | 'archive' | 'database' | 'markdown'
     | 'csv'
     | 'other';
+
+// Helper function to check if a filepath is a presentation attachment
+function isPresentationAttachment(filepath: string): boolean {
+    // Check if it matches patterns like:
+    // - presentations/[name]/slide_01.html
+    // - presentations/[name]/metadata.json
+    const presentationPattern = /^presentations\/([^\/]+)\/(slide_\d+\.html|metadata\.json)$/i;
+    return presentationPattern.test(filepath);
+}
+
+// Helper function to extract presentation name from filepath
+function extractPresentationName(filepath: string): string | null {
+    const match = filepath.match(/^presentations\/([^\/]+)\//i);
+    return match ? match[1] : null;
+}
+
+// Helper function to extract slide number from filepath
+function extractSlideNumber(filepath: string): number | null {
+    // Match patterns like slide_01.html, slide_1.html, etc.
+    const match = filepath.match(/slide_(\d+)\.html$/i);
+    if (match) {
+        return parseInt(match[1], 10);
+    }
+    return null;
+}
 
 // Simple extension-based file type detection
 function getFileType(filename: string): FileType {
@@ -190,9 +217,11 @@ export function FileAttachment({
 }: FileAttachmentProps) {
     // Authentication 
     const { session } = useAuth();
+    const { openPresentation } = usePresentationViewerStore();
 
     // Simplified state management
     const [hasError, setHasError] = React.useState(false);
+    const [isSandboxDeleted, setIsSandboxDeleted] = React.useState(false);
     const [imageLoaded, setImageLoaded] = React.useState(false);
 
     // XLSX sheet management
@@ -226,7 +255,8 @@ export function FileAttachment({
     const {
         data: fileContent,
         isLoading: fileContentLoading,
-        error: fileContentError
+        error: fileContentError,
+        failureCount: fileRetryAttempt
     } = useFileContent(
         shouldLoadContent ? sandboxId : undefined,
         shouldLoadContent ? filepath : undefined
@@ -236,7 +266,8 @@ export function FileAttachment({
     const {
         data: imageUrl,
         isLoading: imageLoading,
-        error: imageError
+        error: imageError,
+        failureCount: imageRetryAttempt
     } = useImageContent(
         isImage && showPreview && sandboxId ? sandboxId : undefined,
         isImage && showPreview ? filepath : undefined
@@ -262,12 +293,39 @@ export function FileAttachment({
         isXlsx && shouldShowPreview ? filepath : undefined
     );
 
-    // Set error state based on query errors
+    // Helper function to check if error is due to deleted sandbox
+    const isSandboxDeletedError = (error: any): boolean => {
+        if (!error) return false;
+        const errorMessage = error?.message || error?.toString() || '';
+        return (
+            errorMessage.includes('404') ||
+            errorMessage.includes('Sandbox not found') ||
+            errorMessage.includes('Failed to retrieve sandbox') ||
+            errorMessage.includes('no project owns this sandbox')
+        );
+    };
+
+    // Set error state based on query errors - but only after retries exhausted
     React.useEffect(() => {
-        if (fileContentError || imageError || pdfError || xlsxError) {
-            setHasError(true);
+        const anyError = fileContentError || imageError || pdfError || xlsxError;
+        const isStillRetrying = imageRetryAttempt < 15 || fileRetryAttempt < 15;
+        
+        if (anyError && !isStillRetrying) {
+            // Only show error after retries exhausted
+            // Check if it's a sandbox deleted error
+            if (isSandboxDeletedError(anyError)) {
+                setIsSandboxDeleted(true);
+                setHasError(false); // Don't show regular error UI
+            } else {
+                setHasError(true);
+                setIsSandboxDeleted(false);
+            }
+        } else if (!anyError) {
+            // Clear error state if no error
+            setHasError(false);
+            setIsSandboxDeleted(false);
         }
-    }, [fileContentError, imageError, pdfError, xlsxError]);
+    }, [fileContentError, imageError, pdfError, xlsxError, imageRetryAttempt, fileRetryAttempt]);
 
     // Reset image loaded state when URL changes
     React.useEffect(() => {
@@ -342,6 +400,35 @@ export function FileAttachment({
         }
     };
 
+    // Check if this is a presentation attachment - render with PresentationSlidePreview
+    if (isPresentationAttachment(filepath) && project) {
+        const presentationName = extractPresentationName(filepath);
+        const slideNumber = extractSlideNumber(filepath);
+        if (presentationName && project?.sandbox?.sandbox_url) {
+            return (
+                <PresentationSlidePreview
+                    presentationName={presentationName}
+                    project={project}
+                    initialSlide={slideNumber || undefined}
+                    onFullScreenClick={(slideNum) => {
+                        // Open the full-screen presentation viewer modal
+                        console.log('[FileAttachment] Opening presentation:', {
+                            presentationName,
+                            sandboxUrl: project.sandbox.sandbox_url,
+                            slideNumber: slideNum || slideNumber || 1
+                        });
+                        openPresentation(
+                            presentationName,
+                            project.sandbox.sandbox_url,
+                            slideNum || slideNumber || 1
+                        );
+                    }}
+                    className={className}
+                />
+            );
+        }
+    }
+
     // Images are displayed with their natural aspect ratio
     if (isImage && showPreview) {
         // Use custom height for images if provided through CSS variable
@@ -350,6 +437,36 @@ export function FileAttachment({
             : '54px';
 
         // No separate loading state needed - we handle it inline in the main render
+
+        // Check for sandbox deleted state
+        if (isSandboxDeleted) {
+            return (
+                <div
+                    className={cn(
+                        "group relative rounded-xl",
+                        "border border-border/50",
+                        "bg-muted/30",
+                        "p-0 overflow-hidden",
+                        "flex flex-col items-center justify-center gap-2",
+                        "opacity-50 cursor-not-allowed",
+                        // Match the aspect ratio behavior
+                        isGridLayout ? "w-full aspect-[4/3]" : "h-[54px] w-[54px]",
+                        className
+                    )}
+                    style={{
+                        ...customStyle,
+                        // For grid layout, ensure proper minimum dimensions
+                        minHeight: isGridLayout ? '200px' : undefined,
+                        height: isGridLayout ? 'auto' : undefined
+                    }}
+                    title={`${filename} - Sandbox no longer available`}
+                >
+                    <IconComponent className="h-6 w-6 text-muted-foreground" />
+                    <div className="text-xs text-muted-foreground font-medium">Unavailable</div>
+                    <div className="text-[10px] text-muted-foreground/70">Sandbox deleted</div>
+                </div>
+            );
+        }
 
         // Check for errors
         if (imageError || hasError) {
@@ -381,6 +498,29 @@ export function FileAttachment({
             );
         }
 
+        // Check if we're waiting for sandboxId to load (race condition)
+        const isSandboxFile = !filepath.startsWith('http://') && !filepath.startsWith('https://') && !localPreviewUrl;
+        const waitingForSandboxId = isSandboxFile && !sandboxId;
+        
+        if (waitingForSandboxId) {
+            return (
+                <div
+                    className={cn(
+                        "relative rounded-2xl",
+                        "border border-border/50",
+                        "bg-muted/20",
+                        "flex items-center justify-center",
+                        isGridLayout ? "w-full aspect-[4/3] min-h-[200px]" : "h-[54px] w-[54px]",
+                        className
+                    )}
+                    style={customStyle}
+                    title="Loading sandbox..."
+                >
+                    <Loader2 className="h-6 w-6 text-muted-foreground animate-spin" />
+                </div>
+            );
+        }
+
         return (
             <button
                 onClick={handleClick}
@@ -406,8 +546,13 @@ export function FileAttachment({
             >
                 {/* Show loading spinner overlay while image is loading */}
                 {!imageLoaded && isGridLayout && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-black/5 to-black/10 dark:from-white/5 dark:to-white/10 z-10">
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-black/5 to-black/10 dark:from-white/5 dark:to-white/10 z-10">
                         <Loader2 className="h-8 w-8 text-primary animate-spin" />
+                        {imageRetryAttempt > 0 && (
+                            <div className="text-xs text-muted-foreground bg-background/80 px-2 py-1 rounded">
+                                Retrying... (attempt {imageRetryAttempt + 1})
+                            </div>
+                        )}
                     </div>
                 )}
                 
@@ -494,7 +639,7 @@ export function FileAttachment({
     const hasContent = fileContent || pdfBlobUrl || xlsxBlobUrl;
     const isLoadingContent = fileContentLoading || pdfLoading || xlsxLoading;
     
-    if (shouldShowPreview && isGridLayout && (hasContent || isLoadingContent || hasError)) {
+    if (shouldShowPreview && isGridLayout && (hasContent || isLoadingContent || hasError || isSandboxDeleted)) {
         // Determine the renderer component
         const Renderer = rendererMap[extension as keyof typeof rendererMap];
 
@@ -515,7 +660,7 @@ export function FileAttachment({
                     minWidth: 0,          // Prevent flex shrinking issues
                     ...customStyle
                 }}
-                onClick={hasError ? handleClick : undefined} // Make clickable if error
+                onClick={hasError && !isSandboxDeleted ? handleClick : undefined} // Make clickable if error (but not if sandbox deleted)
             >
                 {/* Content area */}
                 <div
@@ -528,7 +673,7 @@ export function FileAttachment({
                     }}
                 >
                     {/* Render PDF, XLSX, or text-based previews */}
-                    {!hasError && (
+                    {!hasError && !isSandboxDeleted && (
                         <>
                             {isPdf && (() => {
                                 const pdfUrlForRender = localPreviewUrl || (sandboxId ? (pdfBlobUrl ?? null) : fileUrl);
@@ -561,8 +706,19 @@ export function FileAttachment({
                         </>
                     )}
 
+                    {/* Sandbox deleted state */}
+                    {isSandboxDeleted && (
+                        <div className="h-full w-full flex flex-col items-center justify-center p-4 opacity-50">
+                            <IconComponent className="h-12 w-12 text-muted-foreground mb-3" />
+                            <div className="text-muted-foreground font-medium mb-1">File no longer accessible</div>
+                            <div className="text-muted-foreground text-sm text-center">
+                                Sandbox has been deleted
+                            </div>
+                        </div>
+                    )}
+
                     {/* Error state */}
-                    {hasError && (
+                    {hasError && !isSandboxDeleted && (
                         <div className="h-full w-full flex flex-col items-center justify-center p-4">
                             <div className="text-red-500 mb-2">Error loading content</div>
                             <div className="text-muted-foreground text-sm text-center mb-2">
@@ -593,8 +749,13 @@ export function FileAttachment({
 
                     {/* Loading state */}
                     {fileContentLoading && !isPdf && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-background/50 z-10">
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-background/50 z-10">
                             <Loader2 className="h-8 w-8 text-primary animate-spin" />
+                            {fileRetryAttempt > 0 && (
+                                <div className="text-xs text-muted-foreground bg-background/80 px-2 py-1 rounded">
+                                    Retrying... (attempt {fileRetryAttempt + 1})
+                                </div>
+                            )}
                         </div>
                     )}
 
@@ -683,7 +844,37 @@ export function FileAttachment({
         delete (safeStyle as any)['--attachment-height'];
     }
 
-    const fileButton = (
+    const fileButton = isSandboxDeleted ? (
+        <div
+            className={cn(
+                "group flex items-center rounded-xl transition-all duration-200 overflow-hidden cursor-not-allowed",
+                "border border-border/50",
+                "bg-muted/30 opacity-50",
+                "text-left",
+                "h-[54px] w-fit min-w-[200px] max-w-[300px]",
+                className
+            )}
+            style={safeStyle}
+            title={`${filename} - Sandbox no longer available`}
+        >
+            {/* Icon container */}
+            <div className="w-[54px] h-full flex items-center justify-center flex-shrink-0 bg-muted/50">
+                <IconComponent className="h-5 w-5 text-muted-foreground" />
+            </div>
+
+            {/* Text content */}
+            <div className="flex-1 min-w-0 flex flex-col justify-center px-3 py-2 overflow-hidden">
+                <div className="text-sm font-medium text-muted-foreground truncate">
+                    {filename}
+                </div>
+                <div className="text-xs text-muted-foreground flex items-center gap-1 truncate">
+                    <span className="truncate">Unavailable</span>
+                    <span className="flex-shrink-0">·</span>
+                    <span className="flex-shrink-0">Sandbox deleted</span>
+                </div>
+            </div>
+        </div>
+    ) : (
         <button
             onClick={handleClick}
             className={cn(

@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { ToolResultData } from '../types';
 import { Phone, Loader2, User, PhoneCall, PhoneMissed, CheckCircle2, CheckCircle, AlertTriangle } from 'lucide-react';
 import { ToolViewProps } from '../types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { getToolTitle } from '../utils';
-import { useVapiCallRealtime } from '@/hooks/useVapiCallRealtime';
+import { useVapiCallRealtime } from '@/hooks/integrations';
 import { useQuery } from '@tanstack/react-query';
 import { createClient } from '@/lib/supabase/client';
 import type { RealtimeChannel } from '@supabase/supabase-js';
@@ -22,38 +23,22 @@ interface MonitorCallData {
   message?: string;
 }
 
-function extractMonitorData(toolContent: string | undefined): MonitorCallData | null {
-  if (!toolContent) return null;
-  
+function extractMonitorData(toolResult?: ToolResultData): MonitorCallData | null {
+  if (!toolResult?.output) return null;
+
   try {
-    const parsed = typeof toolContent === 'string' ? JSON.parse(toolContent) : toolContent;
-    
-    if (!parsed || typeof parsed !== 'object') return null;
-    
     let output: any = {};
     
-    if ('output' in parsed && typeof parsed.output === 'object') {
-      output = parsed.output;
-    } else if ('tool_execution' in parsed && typeof parsed.tool_execution === 'object') {
-      const result = parsed.tool_execution.result || {};
-      if (typeof result.output === 'string') {
-        try {
-          output = JSON.parse(result.output);
-        } catch {
-          output = {};
-        }
-      } else if (typeof result.output === 'object') {
-        output = result.output || {};
-      }
-    } else if ('content' in parsed && typeof parsed.content === 'string') {
+    if (typeof toolResult.output === 'string') {
       try {
-        const innerParsed = JSON.parse(parsed.content);
-        return extractMonitorData(JSON.stringify(innerParsed));
-      } catch {
+        output = JSON.parse(toolResult.output);
+      } catch (e) {
         return null;
       }
+    } else if (typeof toolResult.output === 'object' && toolResult.output !== null) {
+      output = toolResult.output;
     }
-    
+
     return {
       call_id: output.call_id || '',
       status: output.status || 'unknown',
@@ -82,60 +67,85 @@ const statusConfig = {
 };
 
 export function MonitorCallToolView({
-  name = 'monitor_call',
-  assistantContent,
-  toolContent,
+  toolCall,
+  toolResult,
   assistantTimestamp,
   toolTimestamp,
   isSuccess = true,
   isStreaming = false,
 }: ToolViewProps) {
-  const initialData = extractMonitorData(toolContent);
+  // All hooks must be called unconditionally at the top
+  const [liveTranscript, setLiveTranscript] = useState<any[]>([]);
+  const [liveStatus, setLiveStatus] = useState('unknown');
+  const transcriptEndRef = useRef<HTMLDivElement>(null);
+
+  // Extract data safely - handle undefined toolCall
+  const initialData = extractMonitorData(toolResult);
+  const name = toolCall?.function_name?.replace(/_/g, '-').toLowerCase() || 'monitor-call';
+  const toolTitle = getToolTitle(name);
+  
   console.log('[MonitorCallToolView] Component rendered with:', {
-    toolContent,
+    toolResult,
     extractedData: initialData,
     callId: initialData?.call_id,
     initialTranscript: initialData?.transcript
   });
-  
-  const [liveTranscript, setLiveTranscript] = useState<any[]>(initialData?.transcript || []);
-  const [liveStatus, setLiveStatus] = useState(initialData?.status || 'unknown');
-  const toolTitle = getToolTitle(name);
-  const transcriptEndRef = useRef<HTMLDivElement>(null);
-  
-  // Don't use the hook, we'll implement our own subscription
-  // useVapiCallRealtime(initialData?.call_id);
-  
-  // Set up direct Supabase real-time subscription
+
+  // Initialize state from initialData - hook must be unconditional
+  React.useEffect(() => {
+    if (initialData) {
+      setLiveTranscript(initialData.transcript || []);
+      setLiveStatus(initialData.status || 'unknown');
+    }
+  }, [initialData]);
+
+  // Set up direct Supabase real-time subscription - hook must be unconditional
   useEffect(() => {
     if (!initialData?.call_id) return;
-    
+
     console.log('[MonitorCallToolView] Setting up real-time subscription for:', initialData.call_id);
     const supabase = createClient();
     let channel: RealtimeChannel;
-    
+
     const setupSubscription = async () => {
-      // First, do an initial fetch to get current data
-      const { data: currentData } = await supabase
-        .from('vapi_calls')
-        .select('*')
-        .eq('call_id', initialData.call_id)
-        .maybeSingle();
-      
-      if (currentData) {
-        console.log('[MonitorCallToolView] Initial data from DB:', {
-          status: currentData.status,
-          transcriptLength: Array.isArray(currentData.transcript) ? currentData.transcript.length : 0
-        });
-        setLiveStatus(currentData.status);
-        if (currentData.transcript) {
-          const transcript = typeof currentData.transcript === 'string' 
-            ? JSON.parse(currentData.transcript) 
-            : currentData.transcript;
-          setLiveTranscript(Array.isArray(transcript) ? transcript : []);
+      // First, do an initial fetch to get current data via backend API
+      try {
+        const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL;
+        const { data: { session } } = await supabase.auth.getSession();
+        
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        
+        if (session?.access_token) {
+          headers['Authorization'] = `Bearer ${session.access_token}`;
         }
+
+        const response = await fetch(`${API_URL}/vapi/calls/${initialData.call_id}`, {
+          headers,
+        });
+
+        if (response.ok) {
+          const currentData = await response.json();
+
+          if (currentData) {
+            console.log('[MonitorCallToolView] Initial data from DB:', {
+              status: currentData.status,
+              transcriptLength: Array.isArray(currentData.transcript) ? currentData.transcript.length : 0
+            });
+            setLiveStatus(currentData.status);
+            if (currentData.transcript) {
+              const transcript = typeof currentData.transcript === 'string'
+                ? JSON.parse(currentData.transcript)
+                : currentData.transcript;
+              setLiveTranscript(Array.isArray(transcript) ? transcript : []);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[MonitorCallToolView] Error fetching initial call data:', error);
       }
-      
+
       // Set up real-time subscription
       channel = supabase
         .channel(`call-monitor-${initialData.call_id}`)
@@ -149,14 +159,14 @@ export function MonitorCallToolView({
           },
           (payload) => {
             console.log('[MonitorCallToolView] Real-time update received:', payload);
-            
+
             if (payload.new) {
               const newData = payload.new as any;
               setLiveStatus(newData.status);
-              
+
               if (newData.transcript) {
-                const transcript = typeof newData.transcript === 'string' 
-                  ? JSON.parse(newData.transcript) 
+                const transcript = typeof newData.transcript === 'string'
+                  ? JSON.parse(newData.transcript)
                   : newData.transcript;
                 const transcriptArray = Array.isArray(transcript) ? transcript : [];
                 console.log('[MonitorCallToolView] Updating transcript via real-time:', transcriptArray.length, 'messages');
@@ -169,9 +179,9 @@ export function MonitorCallToolView({
           console.log('[MonitorCallToolView] Subscription status:', status);
         });
     };
-    
+
     setupSubscription();
-    
+
     return () => {
       console.log('[MonitorCallToolView] Cleaning up subscription');
       if (channel) {
@@ -180,41 +190,61 @@ export function MonitorCallToolView({
     };
   }, [initialData?.call_id]);
 
+  // useQuery hook must be called unconditionally
   const { data: realtimeData, refetch } = useQuery({
     queryKey: ['vapi-call', initialData?.call_id],
     queryFn: async () => {
       if (!initialData?.call_id) return null;
-      const supabase = createClient();
       
-      // Use maybeSingle() instead of single() to handle 0 rows gracefully
-      const { data, error } = await supabase
-        .from('vapi_calls')
-        .select('*')
-        .eq('call_id', initialData.call_id)
-        .maybeSingle();
-      
-      if (error && error.code !== 'PGRST116') {
+      try {
+        const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL;
+        const supabase = createClient();
+        const { data: { session } } = await supabase.auth.getSession();
+        
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        
+        if (session?.access_token) {
+          headers['Authorization'] = `Bearer ${session.access_token}`;
+        }
+
+        const response = await fetch(`${API_URL}/vapi/calls/${initialData.call_id}`, {
+          headers,
+        });
+
+        if (!response.ok) {
+          if (response.status === 404) {
+            // Call not found, return initial data to keep showing something
+            return initialData;
+          }
+          console.error('[MonitorCallToolView] Error fetching call data:', response.statusText);
+          return null;
+        }
+
+        const data = await response.json();
+
+        // If no data found, return initial data to keep showing something
+        if (!data) {
+          console.log('[MonitorCallToolView] No data found, using initial data');
+          return {
+            call_id: initialData.call_id,
+            status: initialData.status || 'queued',
+            transcript: initialData.transcript || [],
+            phone_number: initialData.phone_number,
+            is_live: true
+          };
+        }
+
+        console.log('[MonitorCallToolView] Fetched call data:', {
+          status: data.status,
+          transcriptLength: Array.isArray(data.transcript) ? data.transcript.length : 0
+        });
+        return data;
+      } catch (error) {
         console.error('[MonitorCallToolView] Error fetching call data:', error);
         return null;
       }
-      
-      // If no data found, return initial data to keep showing something
-      if (!data) {
-        console.log('[MonitorCallToolView] No data found, using initial data');
-        return {
-          call_id: initialData.call_id,
-          status: initialData.status || 'queued',
-          transcript: initialData.transcript || [],
-          phone_number: initialData.phone_number,
-          is_live: true
-        };
-      }
-      
-      console.log('[MonitorCallToolView] Fetched call data:', {
-        status: data.status,
-        transcriptLength: Array.isArray(data.transcript) ? data.transcript.length : 0
-      });
-      return data;
     },
     enabled: !!initialData?.call_id,
     refetchInterval: (query) => {
@@ -229,16 +259,14 @@ export function MonitorCallToolView({
     gcTime: 5 * 60 * 1000,  // Keep in cache for 5 minutes
   });
 
-  // Remove this useEffect as we're now handling updates via direct subscription
-  // The query is now just for backup/fallback
-
+  // Scroll effect - hook must be unconditional
   useEffect(() => {
     if (transcriptEndRef.current && liveTranscript.length > 0) {
       transcriptEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [liveTranscript]);
 
-  // Backup polling in case real-time subscription fails
+  // Backup polling in case real-time subscription fails - hook must be unconditional
   useEffect(() => {
     if (liveStatus === 'in-progress' || liveStatus === 'ringing' || liveStatus === 'queued') {
       console.log('[MonitorCallToolView] Setting up backup polling for active call');
@@ -246,7 +274,7 @@ export function MonitorCallToolView({
         // Only refetch if we haven't received updates in a while
         refetch();
       }, 3000); // Less frequent since we have real-time subscription
-      
+
       return () => clearInterval(interval);
     }
   }, [liveStatus, refetch]);
@@ -261,7 +289,7 @@ export function MonitorCallToolView({
   const StatusIcon = statusInfo.icon;
   const isActive = currentStatus === 'ringing' || currentStatus === 'in-progress' || currentStatus === 'queued';
   const currentTranscript = liveTranscript; // Always use the live transcript state
-  
+
   return (
     <Card className="gap-0 flex border shadow-none border-t border-b-0 border-x-0 p-0 rounded-none flex-col overflow-hidden bg-card">
       <CardHeader className="h-14 bg-zinc-50/80 dark:bg-zinc-900/80 backdrop-blur-sm border-b p-2 px-4 space-y-2">
@@ -310,9 +338,6 @@ export function MonitorCallToolView({
       </CardHeader>
 
       <CardContent className="p-4 space-y-4">
-        {assistantContent && (
-          <div className="text-sm text-foreground">{assistantContent}</div>
-        )}
 
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1">
@@ -321,7 +346,7 @@ export function MonitorCallToolView({
               {initialData.call_id}
             </div>
           </div>
-          
+
           {initialData.phone_number && (
             <div className="space-y-1">
               <div className="text-xs text-muted-foreground">Phone Number</div>
@@ -337,7 +362,7 @@ export function MonitorCallToolView({
             <div className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
               <User className="h-3 w-3" />
               {isActive ? (
-                <span className="text-red-500 font-bold">🔴 LIVE CONVERSATION</span>
+                <span className="text-red-500 font-medium">🔴 LIVE CONVERSATION</span>
               ) : (
                 <span>Conversation Transcript</span>
               )}

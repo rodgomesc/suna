@@ -11,7 +11,7 @@ import { FileAttachment } from '../../file-attachment';
 import { XlsxRenderer } from '@/components/file-renderers/xlsx-renderer';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu';
 import { useAuth } from '@/components/AuthProvider';
-import { fetchFileContent } from '@/hooks/react-query/files/use-file-queries';
+import { fetchFileContent } from '@/hooks/files/use-file-queries';
 
 function getFileUrl(sandboxId: string | undefined, path: string): string {
   if (!sandboxId) return path;
@@ -39,19 +39,26 @@ const isXlsxPath = (p?: string | null) => !!p && p.toLowerCase().endsWith('.xlsx
 const isCsvPath = (p?: string | null) => !!p && p.toLowerCase().endsWith('.csv');
 
 export function SheetsToolView({
-  name = 'sheets-tool',
-  assistantContent,
-  toolContent,
+  toolCall,
+  toolResult,
   assistantTimestamp,
   toolTimestamp,
   isSuccess = true,
   isStreaming = false,
   project,
 }: ToolViewProps) {
+  // All hooks must be called unconditionally at the top
   const { session } = useAuth();
-  const parsed = useMemo(() => parseToolResult(toolContent) || parseToolResult(assistantContent), [toolContent, assistantContent]);
-  const toolName = (parsed?.toolName || name).toLowerCase();
-  const outputObj = useMemo(() => toObject(parsed?.toolOutput), [parsed]);
+
+  // Extract name safely - use fallback if toolCall is undefined
+  const name = toolCall?.function_name?.replace(/_/g, '-').toLowerCase() || 'sheets-tool';
+  const toolName = name.toLowerCase();
+  
+  // Extract output from toolResult - hooks must be unconditional
+  const outputObj = useMemo(() => {
+    if (!toolResult?.output) return null;
+    return toObject(toolResult.output);
+  }, [toolResult]);
 
   const createdPath: string | null = outputObj?.created || null;
   const updatedPath: string | null = outputObj?.updated || null;
@@ -76,8 +83,6 @@ export function SheetsToolView({
     (primaryXlsx ? primaryXlsx.replace(/\.xlsx$/i, '.csv') : null)
   );
 
-
-
   const sheetTitle = useMemo(() => {
     switch (toolName) {
       case 'create-sheet': return 'Create Sheet';
@@ -98,8 +103,9 @@ export function SheetsToolView({
       case 'analyze-sheet': return 'bg-gradient-to-br from-purple-500/20 to-purple-600/10 border border-purple-500/20';
       case 'visualize-sheet': return 'bg-gradient-to-br from-green-500/20 to-green-600/10 border border-green-500/20';
       case 'format-sheet': return 'bg-gradient-to-br from-red-500/20 to-red-600/10 border border-red-500/20';
+      default: return 'bg-gradient-to-br from-gray-500/20 to-gray-600/10 border border-gray-500/20';
     }
-  }, [toolContent]);
+  }, [toolName]);
 
   const getSheetIconColor = useCallback(() => {
     switch (toolName) {
@@ -109,6 +115,7 @@ export function SheetsToolView({
       case 'analyze-sheet': return 'text-purple-600';
       case 'visualize-sheet': return 'text-green-600';
       case 'format-sheet': return 'text-red-600';
+      default: return 'text-gray-600';
     }
   }, [toolName]);
 
@@ -136,6 +143,12 @@ export function SheetsToolView({
       console.error('Download failed:', e);
     }
   }, [sandboxId, session?.access_token]);
+
+  // Defensive check - ensure toolCall is defined (after all hooks)
+  if (!toolCall) {
+    console.warn('SheetsToolView: toolCall is undefined. Tool views should use structured props.');
+    return null;
+  }
 
   const inlineHeaders: string[] | null = (
     outputObj?.result_preview?.headers ||
@@ -200,9 +213,9 @@ export function SheetsToolView({
         <div className="flex flex-col h-full">
           <div className="flex-1 min-w-0">
             <ScrollArea className="h-full">
-              <div className="p-4 flex flex-col h-full space-y-4">
+              <div className="p-4 flex flex-col space-y-4">
                 {primaryXlsx ? (
-                  <div className="space-y-3 h-full">
+                  <div className="space-y-3">
                     <XlsxRenderer
                       filePath={primaryXlsx}
                       fileName={(primaryXlsx.split('/').pop() || 'sheet.xlsx')}
@@ -211,7 +224,7 @@ export function SheetsToolView({
                     />
                   </div>
                 ) : primaryCsv ? (
-                  <div className="space-y-3 h-full">
+                  <div className="space-y-3">
                     <div className="flex items-center gap-2 text-sm text-muted-foreground">
                       <Table className="h-4 w-4" />
                       Preview (CSV data)

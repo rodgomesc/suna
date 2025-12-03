@@ -6,29 +6,26 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { extractMakeCallData, formatPhoneNumber, statusConfig } from './_utils';
 import { getToolTitle } from '../utils';
-import { useVapiCallRealtime } from '@/hooks/useVapiCallRealtime';
+import { useVapiCallRealtime } from '@/hooks/integrations';
 import { useQuery } from '@tanstack/react-query';
 import { createClient } from '@/lib/supabase/client';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export function MakeCallToolView({
-  name = 'make-phone-call',
-  assistantContent,
-  toolContent,
+  toolCall,
+  toolResult,
   assistantTimestamp,
   toolTimestamp,
   isSuccess = true,
   isStreaming = false,
 }: ToolViewProps) {
-  const callData = extractMakeCallData(toolContent);
+  // All hooks must be called unconditionally at the top
+  // We need to extract callData first to use it in hooks, but we'll handle undefined case
+  const callData = toolCall ? extractMakeCallData(toolCall, toolResult) : null;
   const [liveTranscript, setLiveTranscript] = useState<any[]>([]);
   const [liveStatus, setLiveStatus] = useState(callData?.status || 'queued');
   const [previousTranscriptLength, setPreviousTranscriptLength] = useState(0);
-  const toolTitle = getToolTitle(name);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
-
-
-
 
   // Subscribe to real-time updates
   useVapiCallRealtime(callData?.call_id);
@@ -37,23 +34,40 @@ export function MakeCallToolView({
     queryKey: ['vapi-call', callData?.call_id],
     queryFn: async () => {
       if (!callData?.call_id) return null;
-      const supabase = createClient();
-      const { data, error } = await supabase
-        .from('vapi_calls')
-        .select('*')
-        .eq('call_id', callData.call_id)
-        .single();
       
-      if (error) {
+      try {
+        const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL;
+        const supabase = createClient();
+        const { data: { session } } = await supabase.auth.getSession();
+        
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        
+        if (session?.access_token) {
+          headers['Authorization'] = `Bearer ${session.access_token}`;
+        }
+
+        const response = await fetch(`${API_URL}/vapi/calls/${callData.call_id}`, {
+          headers,
+        });
+
+        if (!response.ok) {
+          console.error('[MakeCallToolView] Error fetching call:', response.statusText);
+          return null;
+        }
+
+        const data = await response.json();
+
+        console.log('[MakeCallToolView] Fetched call data:', {
+          status: data?.status,
+          transcriptLength: Array.isArray(data?.transcript) ? data.transcript.length : 0
+        });
+        return data;
+      } catch (error) {
         console.error('[MakeCallToolView] Error fetching call:', error);
         return null;
       }
-      
-      console.log('[MakeCallToolView] Fetched call data:', {
-        status: data?.status,
-        transcriptLength: Array.isArray(data?.transcript) ? data.transcript.length : 0
-      });
-      return data;
     },
     enabled: !!callData?.call_id,
     refetchInterval: (query) => {
@@ -71,15 +85,15 @@ export function MakeCallToolView({
         status: realtimeData.status,
         transcript: realtimeData.transcript
       });
-      
+
       setLiveStatus(realtimeData.status);
-      
+
       if (realtimeData.transcript) {
         try {
-          const parsed = typeof realtimeData.transcript === 'string' 
-            ? JSON.parse(realtimeData.transcript) 
+          const parsed = typeof realtimeData.transcript === 'string'
+            ? JSON.parse(realtimeData.transcript)
             : realtimeData.transcript;
-          
+
           const transcriptArray = Array.isArray(parsed) ? parsed : [];
           console.log('[MakeCallToolView] Setting transcript:', transcriptArray.length, 'messages');
           setLiveTranscript(transcriptArray);
@@ -101,6 +115,15 @@ export function MakeCallToolView({
     }
   }, [liveTranscript, previousTranscriptLength]);
 
+  // Defensive check - handle cases where toolCall might be undefined
+  if (!toolCall) {
+    console.warn('MakeCallToolView: toolCall is undefined. Tool views should use structured props.');
+    return null;
+  }
+
+  const name = toolCall.function_name.replace(/_/g, '-').toLowerCase();
+  const toolTitle = getToolTitle(name);
+
   if (!callData) {
     return <div className="text-sm text-muted-foreground">No call data available</div>;
   }
@@ -113,7 +136,7 @@ export function MakeCallToolView({
     <motion.div
       initial={isNew ? { opacity: 0, y: 20, scale: 0.9 } : { opacity: 1, y: 0, scale: 1 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={isNew ? { 
+      transition={isNew ? {
         type: "spring",
         stiffness: 400,
         damping: 25,
@@ -128,7 +151,7 @@ export function MakeCallToolView({
       <div className="font-medium text-xs text-muted-foreground mb-1 flex items-center gap-1">
         {msg.role === 'assistant' ? (
           <>
-            <motion.div 
+            <motion.div
               className="w-2 h-2 rounded-full bg-primary"
               animate={isNew ? { scale: [1, 1.2, 1] } : {}}
               transition={{ repeat: isNew ? 2 : 0, duration: 0.5 }}
@@ -147,11 +170,11 @@ export function MakeCallToolView({
       </div>
     </motion.div>
   ), (prevProps, nextProps) => {
-    return prevProps.msg.message === nextProps.msg.message && 
-           prevProps.msg.role === nextProps.msg.role &&
-           prevProps.isNew === nextProps.isNew;
+    return prevProps.msg.message === nextProps.msg.message &&
+      prevProps.msg.role === nextProps.msg.role &&
+      prevProps.isNew === nextProps.isNew;
   });
-  
+
   MessageBubble.displayName = 'MessageBubble';
 
   return (
@@ -197,10 +220,6 @@ export function MakeCallToolView({
       </CardHeader>
 
       <CardContent className="p-4 space-y-4">
-        {assistantContent && (
-          <div className="text-sm text-foreground">{assistantContent}</div>
-        )}
-
         <AnimatePresence mode="wait">
           {isActive && liveTranscript.length > 0 ? (
             <motion.div
@@ -211,7 +230,7 @@ export function MakeCallToolView({
               transition={{ duration: 0.5, type: "spring" }}
               className="space-y-6"
             >
-              <motion.div 
+              <motion.div
                 className="relative h-32 flex items-center justify-center overflow-hidden rounded-2xl"
                 initial={{ height: 0 }}
                 animate={{ height: 128 }}
@@ -221,16 +240,16 @@ export function MakeCallToolView({
                   className="relative z-10"
                   initial={{ scale: 0, rotate: -180 }}
                   animate={{ scale: 1, rotate: 0 }}
-                  transition={{ 
+                  transition={{
                     type: "spring",
                     stiffness: 260,
                     damping: 20,
                     delay: 0.2
                   }}
                 >
-                  <motion.div 
+                  <motion.div
                     className="w-20 h-20 rounded-full bg-destructive flex items-center justify-center"
-                    animate={{ 
+                    animate={{
                       scale: [1, 1.05, 1]
                     }}
                     transition={{
@@ -247,14 +266,14 @@ export function MakeCallToolView({
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: 0.5 }}
                   >
-                    <span className="text-xs font-bold text-red-500 uppercase tracking-wider flex items-center gap-1">
+                    <span className="text-xs font-medium text-red-500 uppercase tracking-wider flex items-center gap-1">
                       <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
                       Live
                     </span>
                   </motion.div>
                 </motion.div>
               </motion.div>
-              <motion.div 
+              <motion.div
                 className="flex justify-center"
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -269,7 +288,7 @@ export function MakeCallToolView({
                   </Badge>
                 </div>
               </motion.div>
-              <motion.div 
+              <motion.div
                 className="h-64 overflow-y-auto rounded-lg bg-muted/50 p-3 border border-border scrollbar-thin scrollbar-thumb-muted-foreground/30 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/50"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
@@ -281,9 +300,9 @@ export function MakeCallToolView({
                 {liveTranscript.map((msg, idx) => {
                   const isNew = idx >= previousTranscriptLength;
                   return (
-                    <MessageBubble 
+                    <MessageBubble
                       key={`${msg.role}-${idx}-${msg.message.substring(0, 20)}`}
-                      msg={msg} 
+                      msg={msg}
                       index={idx}
                       isNew={isNew}
                     />

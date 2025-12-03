@@ -1,3 +1,4 @@
+import hmac
 import sentry
 from fastapi import HTTPException, Request, Header
 from typing import Optional
@@ -5,12 +6,15 @@ import jwt
 from jwt.exceptions import PyJWTError
 from core.utils.logger import structlog
 from core.utils.config import config
-import os
-import base64
-import hashlib
-import hmac
 from core.services.supabase import DBConnection
 from core.services import redis
+from core.utils.logger import logger, structlog
+
+
+def _constant_time_compare(a: str, b: str) -> bool:
+    """Constant-time string comparison to prevent timing attacks."""
+    return hmac.compare_digest(a.encode('utf-8'), b.encode('utf-8'))
+
 
 async def verify_admin_api_key(x_admin_api_key: Optional[str] = Header(None)):
     if not config.KORTIX_ADMIN_API_KEY:
@@ -25,7 +29,8 @@ async def verify_admin_api_key(x_admin_api_key: Optional[str] = Header(None)):
             detail="Admin API key required. Include X-Admin-Api-Key header."
         )
     
-    if x_admin_api_key != config.KORTIX_ADMIN_API_KEY:
+    # Use constant-time comparison to prevent timing attacks
+    if not _constant_time_compare(x_admin_api_key, config.KORTIX_ADMIN_API_KEY):
         raise HTTPException(
             status_code=403,
             detail="Invalid admin API key"
@@ -33,16 +38,56 @@ async def verify_admin_api_key(x_admin_api_key: Optional[str] = Header(None)):
     
     return True
 
-def _decode_jwt_safely(token: str) -> dict:
-    return jwt.decode(
-        token, 
-        options={
-            "verify_signature": False,
-            "verify_exp": True,
-            "verify_aud": False,
-            "verify_iss": False
-        }
-    )
+
+def _decode_jwt_with_verification(token: str) -> dict:
+    """
+    Decode and verify JWT token using Supabase JWT secret.
+    
+    This function properly validates the JWT signature to prevent token forgery.
+    """
+    jwt_secret = config.SUPABASE_JWT_SECRET
+    
+    if not jwt_secret:
+        logger.error("SUPABASE_JWT_SECRET is not configured - JWT verification disabled!")
+        raise HTTPException(
+            status_code=500,
+            detail="Server authentication configuration error"
+        )
+    
+    try:
+        # Verify signature with the Supabase JWT secret
+        # Supabase uses HS256 algorithm by default
+        return jwt.decode(
+            token,
+            jwt_secret,
+            algorithms=["HS256"],
+            options={
+                "verify_signature": True,
+                "verify_exp": True,
+                "verify_aud": False,  # Supabase doesn't always set audience
+                "verify_iss": False,  # Issuer varies by project
+            }
+        )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=401,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    except jwt.InvalidSignatureError:
+        logger.warning("JWT signature verification failed - possible token forgery attempt")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid token signature",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    except PyJWTError as e:
+        logger.warning(f"JWT decode error: {str(e)}")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
 
 async def get_account_id_from_thread(thread_id: str, db: "DBConnection") -> str:
     """
@@ -138,15 +183,19 @@ async def verify_and_get_user_id_from_jwt(request: Request) -> str:
                     )
                     return user_id
                 else:
+                    # Log detailed error for debugging but return generic message
+                    logger.warning(f"API key valid but account not found: {public_key[:8]}...")
                     raise HTTPException(
                         status_code=401,
-                        detail="API key account not found",
+                        detail="Invalid API key",
                         headers={"WWW-Authenticate": "Bearer"}
                     )
             else:
+                # Log detailed error for debugging but return generic message to prevent enumeration
+                logger.debug(f"API key validation failed: {validation_result.error_message}")
                 raise HTTPException(
                     status_code=401,
-                    detail=f"Invalid API key: {validation_result.error_message}",
+                    detail="Invalid API key",
                     headers={"WWW-Authenticate": "Bearer"}
                 )
         except HTTPException:
@@ -171,13 +220,13 @@ async def verify_and_get_user_id_from_jwt(request: Request) -> str:
     token = auth_header.split(' ')[1]
     
     try:
-        payload = _decode_jwt_safely(token)
+        payload = _decode_jwt_with_verification(token)
         user_id = payload.get('sub')
         
         if not user_id:
             raise HTTPException(
                 status_code=401,
-                detail="Invalid token payload",
+                detail="Invalid token",
                 headers={"WWW-Authenticate": "Bearer"}
             )
 
@@ -188,26 +237,48 @@ async def verify_and_get_user_id_from_jwt(request: Request) -> str:
         )
         return user_id
         
-    except PyJWTError:
+    except HTTPException:
+        # Re-raise HTTPExceptions from _decode_jwt_with_verification
+        raise
+    except Exception as e:
+        logger.warning(f"Unexpected JWT error: {str(e)}")
         raise HTTPException(
             status_code=401,
             detail="Invalid token",
             headers={"WWW-Authenticate": "Bearer"}
         )
+
+
+async def get_optional_user_id_from_jwt(request: Request) -> Optional[str]:
+    try:
+        return await verify_and_get_user_id_from_jwt(request)
+    except HTTPException:
+        return None
+
     
 async def get_user_id_from_stream_auth(
     request: Request,
     token: Optional[str] = None
 ) -> str:
+    """
+    Authenticate user for streaming endpoints.
+    Supports JWT via Authorization header or token query param.
+    """
+    logger.debug(f"🔐 get_user_id_from_stream_auth called - has_token: {bool(token)}")
+    
     try:
+        # Try JWT header first
         try:
-            return await verify_and_get_user_id_from_jwt(request)
+            user_id = await verify_and_get_user_id_from_jwt(request)
+            logger.debug(f"✅ Authenticated via JWT header: {user_id[:8]}...")
+            return user_id
         except HTTPException:
             pass
         
+        # Try token query param (for SSE/EventSource which can't set headers)
         if token:
             try:
-                payload = _decode_jwt_safely(token)
+                payload = _decode_jwt_with_verification(token)
                 user_id = payload.get('sub')
                 if user_id:
                     sentry.sentry.set_user({ "id": user_id })
@@ -215,13 +286,16 @@ async def get_user_id_from_stream_auth(
                         user_id=user_id,
                         auth_method="jwt_query"
                     )
+                    logger.debug(f"✅ Authenticated via token param: {user_id[:8]}...")
                     return user_id
-            except Exception:
-                pass
+            except HTTPException:
+                logger.debug("❌ Token param auth failed: invalid token")
+            except Exception as e:
+                logger.debug(f"❌ Token param auth failed: {str(e)}")
         
         raise HTTPException(
             status_code=401,
-            detail="No valid authentication credentials found",
+            detail="Authentication required",
             headers={"WWW-Authenticate": "Bearer"}
         )
     except HTTPException:
@@ -229,15 +303,8 @@ async def get_user_id_from_stream_auth(
     except Exception as e:
         error_msg = str(e)
         if "cannot schedule new futures after shutdown" in error_msg or "connection is closed" in error_msg:
-            raise HTTPException(
-                status_code=503,
-                detail="Server is shutting down"
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error during authentication: {str(e)}"
-            )
+            raise HTTPException(status_code=503, detail="Server is shutting down")
+        raise HTTPException(status_code=500, detail=f"Authentication error: {str(e)}")
 
 async def get_optional_user_id(request: Request) -> Optional[str]:
     auth_header = request.headers.get('Authorization')
@@ -248,7 +315,7 @@ async def get_optional_user_id(request: Request) -> Optional[str]:
     token = auth_header.split(' ')[1]
     
     try:
-        payload = _decode_jwt_safely(token)
+        payload = _decode_jwt_with_verification(token)
         
         user_id = payload.get('sub')
         if user_id:
@@ -258,7 +325,9 @@ async def get_optional_user_id(request: Request) -> Optional[str]:
             )
         
         return user_id
-    except PyJWTError:
+    except HTTPException:
+        return None
+    except Exception:
         return None
 
 get_optional_current_user_id_from_jwt = get_optional_user_id
@@ -278,43 +347,57 @@ async def verify_and_get_agent_authorization(client, agent_id: str, user_id: str
         structlog.error(f"Error verifying agent access for agent {agent_id}, user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to verify agent access")
 
-async def verify_and_authorize_thread_access(client, thread_id: str, user_id: str):
+async def verify_and_authorize_thread_access(client, thread_id: str, user_id: Optional[str]):
+    """
+    Verify that a user has access to a thread.
+    Supports both authenticated and anonymous access (for public threads).
     
+    Args:
+        client: Supabase client
+        thread_id: Thread ID to check
+        user_id: User ID (can be None for anonymous users accessing public threads)
+    """
     try:
-        # Check if user is an admin first (admins have access to all threads)
-        admin_result = await client.table('user_roles').select('role').eq('user_id', user_id).execute()
-        if admin_result.data and len(admin_result.data) > 0:
-            role = admin_result.data[0].get('role')
-            if role in ('admin', 'super_admin'):
-                structlog.get_logger().debug(f"Admin access granted for thread {thread_id}", user_role=role)
-                # Just verify thread exists
-                thread_check = await client.table('threads').select('thread_id').eq('thread_id', thread_id).execute()
-                if not thread_check.data:
-                    raise HTTPException(status_code=404, detail="Thread not found")
-                return True
-        
+        # Get thread data first
         thread_result = await client.table('threads').select('*').eq('thread_id', thread_id).execute()
 
         if not thread_result.data or len(thread_result.data) == 0:
             raise HTTPException(status_code=404, detail="Thread not found")
         
         thread_data = thread_result.data[0]
-
-        if thread_data['account_id'] == user_id:
-            return True
         
+        # Check if thread's project is public - allow anonymous access
         project_id = thread_data.get('project_id')
         if project_id:
             project_result = await client.table('projects').select('is_public').eq('project_id', project_id).execute()
             if project_result.data and len(project_result.data) > 0:
                 if project_result.data[0].get('is_public'):
+                    structlog.get_logger().debug(f"Public thread access granted: {thread_id}")
                     return True
-            
+        
+        # If not public, user must be authenticated
+        if not user_id:
+            raise HTTPException(status_code=403, detail="Authentication required for private threads")
+        
+        # Check if user is an admin (admins have access to all threads)
+        admin_result = await client.table('user_roles').select('role').eq('user_id', user_id).execute()
+        if admin_result.data and len(admin_result.data) > 0:
+            role = admin_result.data[0].get('role')
+            if role in ('admin', 'super_admin'):
+                structlog.get_logger().debug(f"Admin access granted for thread {thread_id}", user_role=role)
+                return True
+        
+        # Check if user owns the thread
+        if thread_data['account_id'] == user_id:
+            return True
+        
+        # Check if user is a team member of the account
         account_id = thread_data.get('account_id')
         if account_id:
             account_user_result = await client.schema('basejump').from_('account_user').select('account_role').eq('user_id', user_id).eq('account_id', account_id).execute()
             if account_user_result.data and len(account_user_result.data) > 0:
                 return True
+        
         raise HTTPException(status_code=403, detail="Not authorized to access this thread")
     except HTTPException:
         raise
