@@ -37,6 +37,7 @@ from core.setup import router as setup_router, webhook_router
 from core.admin.admin_api import router as admin_router
 from core.admin.billing_admin_api import router as billing_admin_router
 from core.admin.notification_admin_api import router as notification_admin_router
+from core.admin.analytics_admin_api import router as analytics_admin_router
 from core.services import transcription as transcription_api
 import sys
 from core.triggers import api as triggers_api
@@ -160,7 +161,7 @@ async def rate_limit_middleware(request: Request, call_next):
     path = request.url.path
     
     # Skip rate limiting for health checks and OPTIONS requests
-    if path in ["/api/health", "/api/health-docker"] or request.method == "OPTIONS":
+    if path in ["/v1/health", "/v1/health-docker"] or request.method == "OPTIONS":
         return await call_next(request)
     
     # Get client identifier
@@ -169,11 +170,11 @@ async def rate_limit_middleware(request: Request, call_next):
     # Apply appropriate rate limiter based on path
     rate_limiter = None
     
-    if "/api/api-keys" in path:
+    if "/v1/api-keys" in path:
         rate_limiter = api_key_rate_limiter
-    elif "/api/admin" in path:
+    elif "/v1/admin" in path:
         rate_limiter = admin_rate_limiter
-    elif any(sensitive in path for sensitive in ["/api/setup/initialize", "/api/billing/webhook"]):
+    elif any(sensitive in path for sensitive in ["/v1/setup/initialize", "/v1/billing/webhook"]):
         rate_limiter = auth_rate_limiter
     
     if rate_limiter:
@@ -238,8 +239,8 @@ if config.ENV_MODE == EnvMode.LOCAL:
 if config.ENV_MODE == EnvMode.STAGING:
     allowed_origins.append("https://staging.suna.so")
     allowed_origins.append("http://localhost:3000")
-    # Allow Vercel preview deployments for both legacy and new project names
-    allow_origin_regex = r"https://(suna|kortixcom)-.*-prjcts\.vercel\.app"
+    # Allow Vercel preview deployments
+    allow_origin_regex = r"https://kortix-.*-prjcts\.vercel\.app"
 
 app.add_middleware(
     CORSMiddleware,
@@ -247,7 +248,7 @@ app.add_middleware(
     allow_origin_regex=allow_origin_regex,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Project-Id", "X-MCP-URL", "X-MCP-Type", "X-MCP-Headers", "X-Refresh-Token", "X-API-Key"],
+    allow_headers=["Content-Type", "Authorization", "X-Project-Id", "X-MCP-URL", "X-MCP-Type", "X-MCP-Headers", "X-API-Key"],
 )
 
 # Create a main API router
@@ -263,6 +264,7 @@ api_router.include_router(api_keys_api.router)
 api_router.include_router(billing_admin_router)
 api_router.include_router(admin_router)
 api_router.include_router(notification_admin_router)
+api_router.include_router(analytics_admin_router)
 
 from core.mcp_module import api as mcp_api
 from core.credentials import api as credentials_api
@@ -338,7 +340,7 @@ async def health_check_docker():
         raise HTTPException(status_code=500, detail="Health check failed")
 
 
-app.include_router(api_router, prefix="/api")
+app.include_router(api_router, prefix="/v1")
 
 
 async def _memory_watchdog():
@@ -384,5 +386,6 @@ if __name__ == "__main__":
         host="0.0.0.0", 
         port=8000,
         workers=workers,
-        loop="asyncio"
+        loop="asyncio",
+        reload=True if is_dev_env else False
     )

@@ -154,11 +154,10 @@ class ContextManager:
             try:
                 bedrock_client = self._get_bedrock_client()
                 if bedrock_client:
-                    # Map profile IDs to model IDs
                     model_id_mapping = {
-                        "heol2zyy5v48": "anthropic.claude-3-5-haiku-20241022-v1:0",
-                        "few7z4l830xh": "anthropic.claude-3-5-sonnet-20241022-v2:0",
-                        "tyj1ks3nj9qf": "anthropic.claude-sonnet-4-20250514-v1:0",
+                        "heol2zyy5v48": "anthropic.claude-haiku-4-5-20251001-v1:0",  # HAIKU 4.5 (Basic Mode)
+                        "few7z4l830xh": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",  # Sonnet 4.5 (Power Mode)
+                        "tyj1ks3nj9qf": "anthropic.claude-sonnet-4-20250514-v1:0",  # Sonnet 4
                     }
                     
                     # Extract profile ID from ARN
@@ -168,7 +167,7 @@ class ContextManager:
                         bedrock_model_id = model_id_mapping.get(profile_id)
                     
                     if not bedrock_model_id:
-                        bedrock_model_id = "anthropic.claude-3-5-haiku-20241022-v1:0"
+                        bedrock_model_id = "anthropic.claude-haiku-4-5-20251001-v1:0"  # Default to HAIKU 4.5
                     
                     # Clean content blocks for Bedrock Converse API
                     def clean_content_for_bedrock(content):
@@ -340,8 +339,8 @@ class ContextManager:
         if not isinstance(msg, dict) or msg.get('role') != 'assistant':
             return []
         
-        tool_calls = msg.get('tool_calls', [])
-        if not tool_calls:
+        tool_calls = msg.get('tool_calls') or []
+        if not tool_calls or not isinstance(tool_calls, list):
             return []
         
         ids = []
@@ -616,11 +615,11 @@ class ContextManager:
                     else:
                         # Some tool_calls are answered - keep only answered ones
                         fixed_msg = msg.copy()
-                        original_tool_calls = fixed_msg.get('tool_calls', [])
+                        original_tool_calls = fixed_msg.get('tool_calls') or []
                         fixed_msg['tool_calls'] = [
                             tc for tc in original_tool_calls 
                             if isinstance(tc, dict) and tc.get('id') in answered_tool_call_ids
-                        ]
+                        ] if isinstance(original_tool_calls, list) else []
                         logger.warning(f"🔧 Removed {len(unanswered)} unanswered tool_calls from assistant message (kept {len(answered)}): {unanswered}")
                         result.append(fixed_msg)
                         fixed_count += 1

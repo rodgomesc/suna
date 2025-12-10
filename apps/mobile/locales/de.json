@@ -168,7 +168,7 @@
     "superworker": {
       "title": "Dein KI-Superworker",
       "description": "Kombiniere alle Features, um maßgeschneiderte KI-Workers für jede Aufgabe zu erstellen, die du brauchst.",
-      "example": "Erstelle einen Kundenservice-Agenten"
+      "example": "Erstelle einen Kundenservice-Worker"
     }
   },
   "settings": {
@@ -492,7 +492,9 @@
     "balanceAfter": "Guthaben danach",
     "noDescription": "Keine Beschreibung",
     "popular": "Beliebt",
-    "subscription": "Abonnement"
+    "subscription": "Abonnement",
+    "subscriptionDisclaimerIos": "Die Zahlung wird zu deinem Apple ID-Konto zum Zeitpunkt der Bestätigung des Kaufs belastet. Das Abonnement verlängert sich automatisch, es sei denn, die automatische Verlängerung wird mindestens 24 Stunden vor Ende des aktuellen Zeitraums deaktiviert. Dein Konto wird für die Verlängerung innerhalb von 24 Stunden vor Ende des aktuellen Zeitraums belastet. Du kannst deine Abonnements verwalten und kündigen, indem du zu den Kontoeinstellungen im App Store nach dem Kauf gehst.",
+    "subscriptionDisclaimerAndroid": "Die Zahlung wird zu deinem Google-Konto zum Zeitpunkt der Bestätigung des Kaufs belastet. Das Abonnement verlängert sich automatisch, es sei denn, die automatische Verlängerung wird mindestens 24 Stunden vor Ende des aktuellen Zeitraums deaktiviert. Du kannst deine Abonnements verwalten und kündigen, indem du zum Google Play Store gehst."
   },
   "theme": {
     "title": "Aussehen",
@@ -529,7 +531,7 @@
     "actionCannotBeUndone": "Diese Aktion kann nicht rückgängig gemacht werden",
     "accountWillBeDeleted": "Dein Konto wird dauerhaft gelöscht",
     "whatWillBeDeleted": "Was Gelöscht Wird",
-    "allAgents": "Alle deine Agenten und Agent-Versionen",
+    "allAgents": "Alle deine Workers und Worker-Versionen",
     "allThreads": "Alle deine Threads und Konversationen",
     "allCredentials": "Alle deine Anmeldedaten und Integrationen",
     "subscriptionData": "Deine Abonnement- und Abrechnungsdaten",
@@ -559,6 +561,8 @@
     "search": "Suchen...",
     "searchConversations": "Chats durchsuchen",
     "searchAgents": "Workers suchen",
+    "searchWorkers": "Workers suchen",
+    "searchTriggers": "Trigger suchen",
     "imageGeneration": "Beschreibe das Bild, das du erstellen möchtest...",
     "imageWithStyle": "Beschreibe dein {{style}}-Bild...",
     "slidesGeneration": "Was für eine Präsentation brauchst du?",
@@ -631,7 +635,7 @@
     "composioApps": "Composio Apps",
     "composioAppsDescription": "Mit Hunderten von Geschäftsanwendungen verbinden",
     "connected": "Verbunden",
-    "connectedToAgent": "Mit diesem Agenten verbunden",
+    "connectedToAgent": "Mit diesem Worker verbunden",
     "available": "Verfügbare Apps",
     "connect": "Verbinden",
     "setup": "Einrichten",
@@ -686,7 +690,7 @@
     },
     "toolsSelector": {
       "configureTools": "{{app}}-Tools konfigurieren",
-      "selectTools": "Wähle Tools für deinen Agenten",
+      "selectTools": "Wähle Tools für deinen Worker",
       "readyToConfigureTools": "Bereit zum Konfigurieren",
       "selected": "{{count}} von {{total}} ausgewählt",
       "selectAll": "Alle auswählen",

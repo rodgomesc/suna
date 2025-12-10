@@ -492,7 +492,9 @@
     "balanceAfter": "交易后余额",
     "noDescription": "无描述",
     "popular": "热门",
-    "subscription": "订阅"
+    "subscription": "订阅",
+    "subscriptionDisclaimerIos": "购买确认时，将向您的Apple ID账户收费。除非在当前期间结束前至少24小时关闭自动续订，否则订阅将自动续订。您的账户将在当前期间结束前24小时内被收取续订费用。购买后，您可以前往App Store的账户设置来管理和取消订阅。",
+    "subscriptionDisclaimerAndroid": "购买确认时，将向您的Google账户收费。除非在当前期间结束前至少24小时关闭自动续订，否则订阅将自动续订。您可以前往Google Play商店来管理和取消订阅。"
   },
   "theme": {
     "title": "外观",
@@ -529,7 +531,7 @@
     "actionCannotBeUndone": "此操作无法撤销",
     "accountWillBeDeleted": "你的账户将被永久删除",
     "whatWillBeDeleted": "将被删除的内容",
-    "allAgents": "你的所有智能体和智能体版本",
+    "allAgents": "你的所有 Workers 和 Worker 版本",
     "allThreads": "你的所有对话线程和会话",
     "allCredentials": "你的所有凭据和集成",
     "subscriptionData": "你的订阅和计费数据",
@@ -559,6 +561,8 @@
     "search": "搜索...",
     "searchConversations": "搜索对话",
     "searchAgents": "搜索 workers",
+    "searchWorkers": "搜索 workers",
+    "searchTriggers": "搜索触发器",
     "imageGeneration": "描述你想创建的图片...",
     "imageWithStyle": "描述你的 {{style}} 图片...",
     "slidesGeneration": "需要什么样的演示文稿？",
@@ -622,7 +626,7 @@
   },
   "integrations": {
     "title": "集成",
-    "description": "连接你喜爱的应用和服务，自动化工作流程并扩展你的智能体能力。",
+    "description": "连接你喜爱的应用和服务，自动化工作流程并扩展你的 Worker 能力。",
     "connectApps": "连接你的应用",
     "externalApps": "外部应用",
     "externalAppsDescription": "连接热门应用和服务",
@@ -631,7 +635,7 @@
     "composioApps": "Composio应用",
     "composioAppsDescription": "连接数百个商业应用和服务",
     "connected": "已连接",
-    "connectedToAgent": "已连接到此智能体",
+    "connectedToAgent": "已连接到此 Worker",
     "available": "可用应用",
     "connect": "连接",
     "setup": "设置",
@@ -686,7 +690,7 @@
     },
     "toolsSelector": {
       "configureTools": "配置{{app}}工具",
-      "selectTools": "选择要添加到智能体的工具",
+      "selectTools": "选择要添加到 Worker 的工具",
       "readyToConfigureTools": "准备配置工具",
       "selected": "已选择{{count}}/{{total}}",
       "selectAll": "全选",

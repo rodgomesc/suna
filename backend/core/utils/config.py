@@ -90,6 +90,13 @@ class Configuration:
     AGENT_TOOL_EXECUTION_STRATEGY: str = "parallel"  # "parallel" or "sequential"
     # ============================================
     
+
+    ENABLE_BOOTSTRAP_MODE: bool = True        # Use two-phase bootstrap+enrichment (faster startup)
+    ENABLE_MINIMAL_PROMPT: bool = True        # Use minimal prompt for first turn (no DB queries)
+    BOOTSTRAP_SLO_WARNING_MS: int = 750       # Emit warning if Phase A exceeds this threshold
+    BOOTSTRAP_SLO_CRITICAL_MS: int = 1500     # Hard timeout for Phase A (fail if exceeded)
+    # =========================================
+    
     # ===== PRESENCE CONFIGURATION =====
     DISABLE_PRESENCE: bool = False  # Disable presence tracking entirely
     # ==================================
@@ -308,6 +315,11 @@ class Configuration:
             return self.STRIPE_CREDITS_500_PRICE_ID_STAGING
         return self.STRIPE_CREDITS_500_PRICE_ID_PROD
     
+    # PostHog Analytics
+    POSTHOG_PERSONAL_API_KEY: Optional[str] = None  # Personal API key (phx_...) for querying analytics
+    POSTHOG_PROJECT_ID: Optional[str] = None  # Project ID from PostHog
+    POSTHOG_HOST: Optional[str] = "https://eu.posthog.com"  # EU or US host
+
     # LLM API keys
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
@@ -319,7 +331,7 @@ class Configuration:
     OPENROUTER_API_BASE: Optional[str] = "https://openrouter.ai/api/v1"
     OPENAI_COMPATIBLE_API_KEY: Optional[str] = None
     OPENAI_COMPATIBLE_API_BASE: Optional[str] = None
-    OR_SITE_URL: Optional[str] = "https://kortix.ai"
+    OR_SITE_URL: Optional[str] = "https://www.kortix.com"
     OR_APP_NAME: Optional[str] = "Kortix AI"
     
     # Frontend URL configuration
