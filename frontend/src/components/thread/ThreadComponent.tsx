@@ -701,13 +701,13 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
           toggleSidePanel();
         }
       } else {
-        openFileInComputer('/workspace');
+        openFileBrowser();
         if (!isSidePanelOpen) {
           toggleSidePanel();
         }
       }
     },
-    [projectId, queryClient, openFileInComputer, isSidePanelOpen, toggleSidePanel],
+    [projectId, queryClient, openFileInComputer, openFileBrowser, isSidePanelOpen, toggleSidePanel],
   );
 
   const toolViewAssistant = useCallback(
