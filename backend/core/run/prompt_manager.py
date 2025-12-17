@@ -7,25 +7,19 @@ from core.tools.mcp_tool_wrapper import MCPToolWrapper
 from core.agentpress.tool import SchemaType
 from core.prompts.agent_builder_prompt import get_agent_builder_prompt
 from core.prompts.prompt import get_system_prompt
-from core.prompts.core_prompt import get_dynamic_system_prompt
-from core.tools.tool_guide_registry import get_minimal_tool_index
+from core.tools.tool_guide_registry import get_minimal_tool_index, get_tool_guide
 from core.utils.logger import logger
 
 class PromptManager:
     @staticmethod
-    async def build_minimal_prompt(agent_config: Optional[dict], tool_registry=None, mcp_loader=None) -> dict:
-        import datetime
-        
+    async def build_minimal_prompt(agent_config: Optional[dict], tool_registry=None, mcp_loader=None, user_id: Optional[str] = None, thread_id: Optional[str] = None, client=None) -> dict:
         if agent_config and agent_config.get('system_prompt'):
             content = agent_config['system_prompt'].strip()
         else:
             from core.prompts.core_prompt import get_core_system_prompt
             content = get_core_system_prompt()
         
-        now = datetime.datetime.now(datetime.timezone.utc)
-        content += f"\n\n=== CURRENT DATE/TIME ===\n"
-        content += f"Today's date: {now.strftime('%A, %B %d, %Y')}\n"
-        content += f"Current time: {now.strftime('%H:%M UTC')}\n"
+        content = PromptManager._append_datetime_info(content)
         
         content += """
 
@@ -50,9 +44,19 @@ If relevant context seems missing, ask a clarifying question.
 
 """
         
+        preloaded_guides = PromptManager._get_preloaded_tool_guides()
+        if preloaded_guides:
+            content += preloaded_guides
+        
         content = await PromptManager._append_jit_mcp_info(content, mcp_loader)
         
-        return {"role": "system", "content": content}
+        system_message = {"role": "system", "content": content}
+        
+        memory_data = await PromptManager._fetch_user_memories(user_id, thread_id, client)
+        if memory_data:
+            return system_message, {"role": "user", "content": f"[CONTEXT - User Memory]\n{memory_data}\n[END CONTEXT]"}
+        
+        return system_message, None
     
     @staticmethod
     async def build_system_prompt(model_name: str, agent_config: Optional[dict], 
@@ -65,19 +69,25 @@ If relevant context seems missing, ask a clarifying question.
                                   use_dynamic_tools: bool = True,
                                   mcp_loader=None) -> dict:
         
-        system_content = PromptManager._build_base_prompt(use_dynamic_tools)
-        system_content = PromptManager._append_agent_system_prompt(system_content, agent_config, use_dynamic_tools)
+        if agent_config and agent_config.get('system_prompt'):
+            system_content = agent_config['system_prompt'].strip()
+        else:
+            from core.prompts.core_prompt import get_core_system_prompt
+            system_content = get_core_system_prompt()
+        
+        system_content = PromptManager._build_base_prompt(system_content, use_dynamic_tools)
         system_content = await PromptManager._append_builder_tools_prompt(system_content, agent_config)
         
         kb_task = PromptManager._fetch_knowledge_base(agent_config, client)
         user_context_task = PromptManager._fetch_user_context_data(user_id, client)
+        memory_task = PromptManager._fetch_user_memories(user_id, thread_id, client)
         
         system_content = PromptManager._append_mcp_tools_info(system_content, agent_config, mcp_wrapper_instance)
         system_content = await PromptManager._append_jit_mcp_info(system_content, mcp_loader)
         system_content = PromptManager._append_xml_tool_calling_instructions(system_content, xml_tool_calling, tool_registry)
         system_content = PromptManager._append_datetime_info(system_content)
         
-        kb_data, user_context_data = await asyncio.gather(kb_task, user_context_task)
+        kb_data, user_context_data, memory_data = await asyncio.gather(kb_task, user_context_task, memory_task)
         
         if kb_data:
             system_content += kb_data
@@ -87,21 +97,53 @@ If relevant context seems missing, ask a clarifying question.
         
         PromptManager._log_prompt_stats(system_content, use_dynamic_tools)
         
-        return {"role": "system", "content": system_content}
+        system_message = {"role": "system", "content": system_content}
+        
+        if memory_data:
+            return system_message, {"role": "user", "content": f"[CONTEXT - User Memory]\n{memory_data}\n[END CONTEXT]"}
+        
+        return system_message, None
     
     @staticmethod
-    def _build_base_prompt(use_dynamic_tools: bool) -> str:
+    def _build_base_prompt(system_content: str, use_dynamic_tools: bool) -> str:
         if use_dynamic_tools:
             logger.info("🚀 [DYNAMIC TOOLS] Using dynamic tool loading system (minimal index only)")
             minimal_index = get_minimal_tool_index()
-            default_system_content = get_dynamic_system_prompt(minimal_index)
-            logger.info(f"📊 [DYNAMIC TOOLS] Core prompt + minimal index: {len(default_system_content):,} chars")
+            system_content += "\n\n" + minimal_index
+            logger.info(f"📊 [DYNAMIC TOOLS] Core prompt + minimal index: {len(system_content):,} chars")
+            
+            preloaded_guides = PromptManager._get_preloaded_tool_guides()
+            if preloaded_guides:
+                system_content += preloaded_guides
+                logger.info(f"📖 [DYNAMIC TOOLS] Added preloaded tool guides: {len(preloaded_guides):,} chars")
         else:
             logger.info("⚠️  [LEGACY MODE] Using full embedded prompt (all tool documentation included)")
-            default_system_content = get_system_prompt()
-            logger.info(f"📊 [LEGACY MODE] Full prompt size: {len(default_system_content):,} chars")
+            system_content = get_system_prompt()
+            logger.info(f"📊 [LEGACY MODE] Full prompt size: {len(system_content):,} chars")
         
-        return default_system_content
+        return system_content
+    
+    @staticmethod
+    def _get_preloaded_tool_guides() -> str:
+        from core.jit.loader import JITLoader
+        
+        core_tools = JITLoader.get_core_tools()
+        guides = []
+        
+        for tool_name in core_tools:
+            guide = get_tool_guide(tool_name)
+            if guide:
+                guides.append(guide)
+        
+        if not guides:
+            return ""
+        
+        guides_content = "\n\n# PRELOADED TOOL USAGE GUIDES\n"
+        guides_content += "The following tools are preloaded and ready to use immediately (no initialize_tools needed):\n\n"
+        guides_content += "\n\n".join(guides)
+        
+        logger.info(f"📖 [PRELOADED GUIDES] Loaded {len(guides)} guides for core tools")
+        return guides_content
     
     @staticmethod
     def _append_agent_system_prompt(system_content: str, agent_config: Optional[dict], use_dynamic_tools: bool) -> str:
@@ -115,10 +157,18 @@ If relevant context seems missing, ask a clarifying question.
             return system_content
         
         agentpress_tools = agent_config.get('agentpress_tools', {})
-        has_builder_tools = any(
-            agentpress_tools.get(tool, False) 
-            for tool in ['agent_config_tool', 'mcp_search_tool', 'credential_profile_tool', 'trigger_tool']
-        )
+        
+        def is_tool_enabled(tool_name: str) -> bool:
+            tool_config = agentpress_tools.get(tool_name)
+            if isinstance(tool_config, bool):
+                return tool_config
+            elif isinstance(tool_config, dict):
+                return tool_config.get('enabled', False)
+            else:
+                return False
+        
+        builder_tool_names = ['agent_creation_tool', 'agent_config_tool', 'mcp_search_tool', 'credential_profile_tool', 'trigger_tool']
+        has_builder_tools = any(is_tool_enabled(tool) for tool in builder_tool_names)
         
         if has_builder_tools:
             builder_prompt = get_agent_builder_prompt()
@@ -432,6 +482,80 @@ Example of correct tool call format (multiple invokes in one block):
             return None
         except Exception as e:
             logger.warning(f"Failed to fetch username for user {user_id}: {e}")
+            return None
+    
+    @staticmethod
+    async def _fetch_user_memories(user_id: Optional[str], thread_id: str, client) -> Optional[str]:
+        if not (user_id and client):
+            logger.debug(f"Memory fetch skipped: user_id={user_id}, client={'yes' if client else 'no'}")
+            return None
+        
+        if not thread_id:
+            logger.debug(f"Memory fetch skipped: no thread_id")
+            return None
+        
+        try:
+            from core.memory.retrieval_service import memory_retrieval_service
+            from core.billing import subscription_service
+            
+            user_memory_result = await client.rpc('get_user_memory_enabled', {'p_account_id': user_id}).execute()
+            user_memory_enabled = user_memory_result.data if user_memory_result.data is not None else True
+            if not user_memory_enabled:
+                logger.debug(f"Memory fetch: disabled by user {user_id}")
+                return None
+            
+            thread_memory_result = await client.rpc('get_thread_memory_enabled', {'p_thread_id': thread_id}).execute()
+            thread_memory_enabled = thread_memory_result.data if thread_memory_result.data is not None else True
+            if not thread_memory_enabled:
+                logger.debug(f"Memory fetch: disabled for thread {thread_id}")
+                return None
+            
+            tier_info = await subscription_service.get_user_subscription_tier(user_id)
+            tier_name = tier_info['name']
+            logger.debug(f"Memory fetch: user {user_id}, tier {tier_name}")
+            
+            messages_result = await client.table('messages').select('content').eq('thread_id', thread_id).eq('type', 'user').order('created_at', desc=False).limit(1).execute()
+            
+            if not messages_result.data:
+                logger.debug(f"Memory fetch: no user messages in thread {thread_id}")
+                return None
+            
+            first_message_content = messages_result.data[0].get('content', {})
+            if isinstance(first_message_content, str):
+                import json as j
+                try:
+                    first_message_content = j.loads(first_message_content)
+                except:
+                    pass
+            
+            query_text = ''
+            if isinstance(first_message_content, dict):
+                query_text = first_message_content.get('content', str(first_message_content))
+            else:
+                query_text = str(first_message_content)
+            
+            if not query_text or len(query_text.strip()) < 10:
+                logger.debug(f"Memory fetch: query too short ({len(query_text)} chars)")
+                return None
+            
+            logger.debug(f"Memory fetch: querying with '{query_text[:50]}...'")
+            
+            memories = await memory_retrieval_service.retrieve_memories(
+                account_id=user_id,
+                query_text=query_text,
+                tier_name=tier_name
+            )
+            
+            if not memories:
+                logger.debug(f"Memory fetch: no memories found for user {user_id}")
+                return None
+            
+            formatted_memories = memory_retrieval_service.format_memories_for_prompt(memories)
+            logger.info(f"Retrieved {len(memories)} memories for user {user_id} (will inject as context message)")
+            return formatted_memories
+        
+        except Exception as e:
+            logger.warning(f"Failed to fetch user memories for {user_id}: {e}")
             return None
     
     @staticmethod

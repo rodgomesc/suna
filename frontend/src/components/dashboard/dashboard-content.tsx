@@ -33,11 +33,12 @@ import { normalizeFilenameToNFC } from '@/lib/utils/unicode';
 import { toast } from 'sonner';
 import { useSunaModePersistence } from '@/stores/suna-modes-store';
 import { Button } from '../ui/button';
-import { X, ChevronRight } from 'lucide-react';
+import { X, ChevronRight, HelpCircle } from 'lucide-react';
 import { useTranslations } from 'next-intl';
 import { NotificationDropdown } from '../notifications/notification-dropdown';
 import { UsageLimitsPopover } from './usage-limits-popover';
 import { useSidebar } from '@/components/ui/sidebar';
+import { DynamicGreeting } from '@/components/ui/dynamic-greeting';
 
 // Lazy load heavy components that aren't immediately visible
 const PlanSelectionModal = lazy(() => 
@@ -64,7 +65,6 @@ const CreditsDisplay = lazy(() =>
 
 const PENDING_PROMPT_KEY = 'pendingAgentPrompt';
 
-
 export function DashboardContent() {
   const t = useTranslations('dashboard');
   const tCommon = useTranslations('common');
@@ -73,6 +73,7 @@ export function DashboardContent() {
   const [inputValue, setInputValue] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showConfigDialog, setShowConfigDialog] = useState(false);
+  const [memoryEnabled, setMemoryEnabled] = useState(true);
   const [configAgentId, setConfigAgentId] = useState<string | null>(null);
   const [isRedirecting, setIsRedirecting] = useState(false);
   const [autoSubmit, setAutoSubmit] = useState(false);
@@ -103,7 +104,6 @@ export function DashboardContent() {
     runningThreadIds: string[];
   } | null>(null);
   const [showUpgradeCelebration, setShowUpgradeCelebration] = useState(false);
-  const [greeting, setGreeting] = useState('');
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
@@ -162,66 +162,6 @@ export function DashboardContent() {
     }
     return `${minutes}m`;
   };
-
-  // Generate randomized greeting on mount
-  React.useEffect(() => {
-    const getGreeting = () => {
-      const hour = new Date().getHours();
-      
-      // Get greeting arrays from translations
-      const morningGreetings = [
-        t('greetings.morning.0'),
-        t('greetings.morning.1'),
-        t('greetings.morning.2'),
-      ];
-      
-      const afternoonGreetings = [
-        t('greetings.afternoon.0'),
-        t('greetings.afternoon.1'),
-      ];
-      
-      const eveningGreetings = [
-        t('greetings.evening.0'),
-        t('greetings.evening.1'),
-        t('greetings.evening.2'),
-      ];
-      
-      const randomGreetings = [
-        t('greetings.random.0'),
-        t('greetings.random.1'),
-        t('greetings.random.2'),
-        t('greetings.random.3'),
-        t('greetings.random.4'),
-        t('greetings.random.5'),
-        t('greetings.random.6'),
-        t('greetings.random.7'),
-        t('greetings.random.8'),
-        t('greetings.random.9'),
-        t('greetings.random.10'),
-        t('greetings.random.11'),
-        t('greetings.random.12'),
-        t('greetings.random.13'),
-        t('greetings.random.14'),
-      ];
-      
-      // 40% chance of time-based greeting, 60% chance of random
-      const useTimeBased = Math.random() < 0.4;
-      
-      if (useTimeBased) {
-        if (hour >= 5 && hour < 12) {
-          return morningGreetings[Math.floor(Math.random() * morningGreetings.length)];
-        } else if (hour >= 12 && hour < 17) {
-          return afternoonGreetings[Math.floor(Math.random() * afternoonGreetings.length)];
-        } else {
-          return eveningGreetings[Math.floor(Math.random() * eveningGreetings.length)];
-        }
-      }
-      
-      return randomGreetings[Math.floor(Math.random() * randomGreetings.length)];
-    };
-    
-    setGreeting(getGreeting());
-  }, [t]);
 
   React.useEffect(() => {
     if (agents.length > 0) {
@@ -339,18 +279,13 @@ export function DashboardContent() {
       localStorage.removeItem(PENDING_PROMPT_KEY);
 
       const formData = new FormData();
-      
-      // Always append prompt - it's required for new threads
-      // The message should never be empty due to validation above, but ensure we always send it
       const trimmedMessage = message.trim();
       if (!trimmedMessage && files.length === 0) {
         setIsSubmitting(false);
         throw new Error('Prompt is required when starting a new Worker');
       }
-      // Always append prompt (even if empty, backend will validate)
       formData.append('prompt', trimmedMessage || message);
 
-      // Add selected agent if one is chosen
       if (selectedAgentId) {
         formData.append('agent_id', selectedAgentId);
       }
@@ -363,10 +298,9 @@ export function DashboardContent() {
       if (options?.model_name && options.model_name.trim()) {
         formData.append('model_name', options.model_name.trim());
       }
-      formData.append('stream', 'true'); // Always stream for better UX
+      formData.append('stream', 'true');
       formData.append('enable_context_manager', String(options?.enable_context_manager ?? false));
 
-      // Debug logging
       console.log('[Dashboard] Starting agent with:', {
         prompt: message.substring(0, 100),
         promptLength: message.length,
@@ -393,6 +327,10 @@ export function DashboardContent() {
         files: files,
         model_name: options?.model_name,
         agent_id: selectedAgentId || undefined,
+        memory_enabled: true,
+      }).then(() => {
+        queryClient.invalidateQueries({ queryKey: ['threads', 'list'] });
+        queryClient.invalidateQueries({ queryKey: ['active-agent-runs'] });
       }).catch((error) => {
         console.error('Background agent start failed:', error);
         
@@ -589,6 +527,13 @@ export function DashboardContent() {
             <CreditsDisplay />
           </Suspense>
           <UsageLimitsPopover />
+          <a
+            href="mailto:support@kortix.com"
+            className="flex items-center justify-center h-[41px] w-[41px] border-[1.5px] border-border/60 dark:border-border rounded-full bg-background dark:bg-background hover:bg-accent/30 dark:hover:bg-accent/20 hover:border-border dark:hover:border-border/80 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            title="Contact Support"
+          >
+            <HelpCircle className="h-5 w-5 text-muted-foreground dark:text-muted-foreground/60" />
+          </a>
         </div>
 
         <div className="flex-1 overflow-y-auto">
@@ -634,18 +579,14 @@ export function DashboardContent() {
 
             <div className="flex-1 flex items-start justify-center pt-[25vh] sm:pt-[30vh]">
               {viewMode === 'super-worker' && (
-                <div className="w-full animate-in fade-in-0 duration-300">
+                <div className="w-full">
                   <div className="px-4 py-6 sm:py-8">
                     <div className="w-full max-w-3xl mx-auto flex flex-col items-center space-y-5 sm:space-y-6 md:space-y-8">
-                      <div className="flex flex-col items-center text-center w-full">
-                        <p
-                          className="tracking-tight text-2xl sm:text-2xl md:text-3xl font-normal text-foreground/90"
-                        >
-                          {greeting || t('whatWouldYouLike')}
-                        </p>
+                      <div className="flex flex-col items-center text-center w-full animate-in fade-in-0 slide-in-from-bottom-4 duration-500 fill-mode-both">
+                        <DynamicGreeting className="text-2xl sm:text-2xl md:text-3xl font-normal text-foreground/90" />
                       </div>
 
-                      <div className="w-full flex flex-col items-center">
+                      <div className="w-full flex flex-col items-center animate-in fade-in-0 slide-in-from-bottom-4 duration-500 delay-100 fill-mode-both">
                         <ChatInput
                           ref={chatInputRef}
                           onSubmit={handleSubmit}
@@ -667,6 +608,8 @@ export function DashboardContent() {
                           selectedCharts={selectedCharts}
                           selectedOutputFormat={selectedOutputFormat}
                           selectedTemplate={selectedTemplate}
+                          memoryEnabled={memoryEnabled}
+                          onMemoryToggle={setMemoryEnabled}
                         />
 
                         {alertType === 'daily_refresh' && (
@@ -713,7 +656,7 @@ export function DashboardContent() {
 
                   {/* Modes Panel - Below chat input, doesn't affect its position */}
                   {isSunaAgent && (
-                    <div className="px-4 pb-6 sm:pb-8">
+                    <div className="px-4 pb-6 sm:pb-8 animate-in fade-in-0 slide-in-from-bottom-4 duration-500 delay-200 fill-mode-both">
                       <div className="max-w-3xl mx-auto">
                         <Suspense fallback={<div className="h-24 bg-muted/10 rounded-lg animate-pulse" />}>
                           <SunaModesPanel

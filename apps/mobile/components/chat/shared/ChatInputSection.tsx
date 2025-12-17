@@ -1,5 +1,6 @@
 import * as React from 'react';
-import { View, KeyboardAvoidingView, Platform, ViewStyle } from 'react-native';
+import { View, KeyboardAvoidingView, Platform, ViewStyle, Keyboard } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useColorScheme } from 'nativewind';
 import { ChatInput, type ChatInputRef } from '../ChatInput';
@@ -17,17 +18,17 @@ export interface ChatInputSectionProps {
   onSendAudio: () => Promise<void>;
   placeholder: string;
   agent?: Agent;
-  
+
   // Attachment props
   attachments: Attachment[];
   onRemoveAttachment: (index: number) => void;
   onAttachPress: () => void;
-  
+
   // Agent selection
   onAgentPress: () => void;
 
   style?: ViewStyle;
-  
+
   // Audio recording
   onAudioRecord: () => Promise<void>;
   onCancelRecording: () => void;
@@ -35,7 +36,7 @@ export interface ChatInputSectionProps {
   recordingDuration: number;
   audioLevel: number;
   audioLevels: number[];
-  
+
   // Quick actions
   selectedQuickAction: string | null;
   selectedQuickActionOption?: string | null;
@@ -44,21 +45,23 @@ export interface ChatInputSectionProps {
   onQuickActionSelectOption?: (optionId: string) => void;
   onQuickActionSelectPrompt?: (prompt: string) => void;
   onQuickActionThreadPress?: (threadId: string) => void;
-  
+
   // Agent running state
   isAgentRunning: boolean;
   onStopAgentRun: () => void;
-  
+
   // Auth
   isAuthenticated: boolean;
-  
+
   // Loading states
   isSendingMessage: boolean;
   isTranscribing: boolean;
-  
+
   // Container styles
   containerClassName?: string;
 
+  // Show quick actions (mode selector)
+  showQuickActions?: boolean;
 }
 
 export interface ChatInputSectionRef {
@@ -120,11 +123,32 @@ export const ChatInputSection = React.memo(React.forwardRef<ChatInputSectionRef,
   isSendingMessage,
   isTranscribing,
   containerClassName = "mx-3 mb-4",
+  showQuickActions = false,
 }, ref) => {
   const { colorScheme } = useColorScheme();
   const { t } = useLanguage();
+  const insets = useSafeAreaInsets();
   const chatInputRef = React.useRef<ChatInputRef>(null);
-  
+  const [isKeyboardVisible, setIsKeyboardVisible] = React.useState(false);
+
+  // Track keyboard visibility
+  React.useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    
+    const showSubscription = Keyboard.addListener(showEvent, () => {
+      setIsKeyboardVisible(true);
+    });
+    const hideSubscription = Keyboard.addListener(hideEvent, () => {
+      setIsKeyboardVisible(false);
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
+
   // Memoize gradient colors based on color scheme
   const gradientColors = React.useMemo(
     () => colorScheme === 'dark' ? DARK_GRADIENT_COLORS : LIGHT_GRADIENT_COLORS,
@@ -155,6 +179,7 @@ export const ChatInputSection = React.memo(React.forwardRef<ChatInputSectionRef,
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       className="absolute bottom-0 left-0 right-0"
       keyboardVerticalOffset={0}
+      style={Platform.OS === 'android' ? { elevation: 100, zIndex: 100 } : undefined}
     >
       {/* Gradient fade from transparent to background */}
       <LinearGradient
@@ -163,16 +188,16 @@ export const ChatInputSection = React.memo(React.forwardRef<ChatInputSectionRef,
         style={GRADIENT_STYLE}
         pointerEvents="none"
       />
-      
+
       {/* Attachment Bar - Above everything */}
-      <AttachmentBar 
+      <AttachmentBar
         attachments={attachments}
         onRemove={onRemoveAttachment}
       />
 
-      {/* Quick Action Expanded Content - Above Input */}
-      {selectedQuickAction && selectedAction && (
-        <View className="mb-3">
+      {/* Quick Action Expanded Content - Above Input (only on home) */}
+      {showQuickActions && selectedQuickAction && selectedAction && (
+        <View className="mb-3" collapsable={false}>
           <QuickActionExpandedView
             actionId={selectedQuickAction}
             actionLabel={selectedActionLabel}
@@ -183,7 +208,7 @@ export const ChatInputSection = React.memo(React.forwardRef<ChatInputSectionRef,
           />
         </View>
       )}
-      
+
       {/* Chat Input */}
       <View className={containerClassName}>
         <ChatInput
@@ -215,14 +240,19 @@ export const ChatInputSection = React.memo(React.forwardRef<ChatInputSectionRef,
         />
       </View>
 
-      {/* Quick Action Bar - Below input (camera-style mode selector) */}
-      {onQuickActionPress && (
-        <View className="pb-8" pointerEvents="box-none">
-          <QuickActionBar 
+      {/* Quick Action Bar - Below input (camera-style mode selector, only on home) */}
+      {showQuickActions && onQuickActionPress && (
+        <View className="pb-8" pointerEvents="box-none" collapsable={false}>
+          <QuickActionBar
             onActionPress={onQuickActionPress}
             selectedActionId={selectedQuickAction}
           />
         </View>
+      )}
+
+      {/* Safe area bottom padding (only when keyboard is NOT visible and quick actions are hidden) */}
+      {!showQuickActions && !isKeyboardVisible && (
+        <View style={{ paddingBottom: Math.max(insets.bottom - 8, 0) }} />
       )}
     </KeyboardAvoidingView>
   );

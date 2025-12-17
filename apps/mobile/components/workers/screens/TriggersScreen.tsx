@@ -18,6 +18,8 @@ import type { TriggerConfiguration } from '@/api/types';
 import { useBillingContext } from '@/contexts/BillingContext';
 import { FreeTierBlock } from '@/components/billing/FreeTierBlock';
 import { useRouter } from 'expo-router';
+import { EmptyState } from '@/components/shared/EmptyState';
+import { useLanguage } from '@/contexts/LanguageContext';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -142,6 +144,7 @@ function TriggerCard({
 }
 
 export function TriggersScreen({ agentId, onUpdate, onUpgradePress }: TriggersScreenProps) {
+  const { t } = useLanguage();
   const { colorScheme } = useColorScheme();
   const router = useRouter();
   const { data: triggers = [], isLoading, refetch } = useAgentTriggers(agentId);
@@ -270,46 +273,44 @@ export function TriggersScreen({ agentId, onUpdate, onUpgradePress }: TriggersSc
 
   return (
     <View className="space-y-4">
-      <View className="mb-6 flex-row items-center justify-between">
+      <View className="mb-2 flex-row items-center justify-between">
         <View className="flex-1 pr-3">
           <Text className="mb-2 font-roobert-semibold text-base text-foreground">Triggers</Text>
           <Text className="font-roobert text-sm text-muted-foreground">
             Automate your worker with scheduled or event-based triggers
           </Text>
         </View>
-        <Pressable
-          onPress={() => {
-            setEditingTrigger(null);
-            setIsCreateDrawerVisible(true);
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          }}
-          className="h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-primary active:opacity-80">
-          <Icon as={Plus} size={20} className="text-primary-foreground" />
-        </Pressable>
       </View>
 
-      {runningTriggers.length === 0 && pausedTriggers.length === 0 ? (
-        <View className="items-center justify-center rounded-2xl border border-border bg-card p-8">
-          <View className="mb-3 h-12 w-12 items-center justify-center rounded-xl bg-muted">
-            <Icon as={Zap} size={24} className="text-muted-foreground" />
-          </View>
-          <Text className="mb-1 font-roobert-semibold text-base text-foreground">
-            No triggers configured
-          </Text>
-          <Text className="mb-4 text-center text-sm text-muted-foreground">
-            Set up triggers to automate this worker
-          </Text>
+      {/* Create Trigger Button - only show when there are triggers */}
+      {!(runningTriggers.length === 0 && pausedTriggers.length === 0) && (
+        <View className="mb-4 flex-row gap-3">
           <Pressable
             onPress={() => {
               setEditingTrigger(null);
               setIsCreateDrawerVisible(true);
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
             }}
-            className="rounded-xl bg-primary px-4 py-2 active:opacity-80">
-            <Text className="font-roobert-semibold text-sm text-primary-foreground">
-              Create Trigger
+            className="flex-1 flex-row items-center justify-center gap-2 rounded-2xl border border-border bg-card px-4 py-3 active:opacity-80">
+            <Icon as={Plus} size={18} className="text-foreground" />
+            <Text className="font-roobert-semibold text-base text-foreground">
+              {t('triggers.createTrigger')}
             </Text>
           </Pressable>
         </View>
+      )}
+
+      {runningTriggers.length === 0 && pausedTriggers.length === 0 ? (
+        <EmptyState
+          icon={Zap}
+          title={t('triggers.noTriggersConfigured')}
+          description={t('triggers.setupTriggersToAutomate')}
+          actionLabel={t('triggers.createTrigger')}
+          onActionPress={() => {
+            setEditingTrigger(null);
+            setIsCreateDrawerVisible(true);
+          }}
+        />
       ) : (
         <>
           {/* Running Section */}
