@@ -221,6 +221,14 @@ export function useFileContentQuery(
       if (error?.message?.includes('401') || error?.message?.includes('403')) {
         return false;
       }
+      // Don't retry on "cannot read directory as file" errors (400)
+      if (error?.message?.includes('400') || error?.message?.includes('Cannot read directory')) {
+        return false;
+      }
+      // Don't retry on 404 not found errors
+      if (error?.message?.includes('404')) {
+        return false;
+      }
       // Retry up to 15 times (~8-10 minutes total with exponential backoff)
       // This prevents DDoS while still handling slow sandbox startups
       return failureCount < 15;

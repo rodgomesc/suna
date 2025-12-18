@@ -153,6 +153,7 @@ export function FileViewerView({
     currentFileIndex,
     setCurrentFileIndex,
     goBackToBrowser,
+    navigateToPath,
     setUnsavedContent,
     getUnsavedContent,
     clearUnsavedContent,
@@ -502,11 +503,29 @@ export function FileViewerView({
     });
 
     // Handle errors
-    if (cachedFileError && !isCachedFileLoading && fileRetryAttempt >= 15) {
-      setContentError(`Failed to load file: ${cachedFileError.message}`);
-      return;
-    } else if (cachedFileError && isCachedFileLoading) {
-      return;
+    if (cachedFileError) {
+      const errorMessage = cachedFileError.message || '';
+      
+      // Check if this is a "cannot read directory as file" error
+      // This happens when the user tries to view a directory path as a file
+      const isDirectoryError = errorMessage.includes('400') || 
+                               errorMessage.includes('Cannot read directory') ||
+                               errorMessage.includes('directory');
+      
+      if (isDirectoryError) {
+        console.log('[FileViewerView] Detected directory path, redirecting to browser:', filePath);
+        // Navigate to this path as a directory instead
+        navigateToPath(filePath);
+        return;
+      }
+      
+      // For other errors, show error message after retries complete
+      if (!isCachedFileLoading && fileRetryAttempt >= 15) {
+        setContentError(`Failed to load file: ${errorMessage}`);
+        return;
+      } else if (isCachedFileLoading) {
+        return;
+      }
     }
 
     // Check for unsaved content first - if it exists, use it instead of cached content
@@ -562,7 +581,7 @@ export function FileViewerView({
         setContentError('Unknown content type received.');
       }
     }
-  }, [filePath, cachedFileContent, isCachedFileLoading, cachedFileError, fileRetryAttempt, getUnsavedContent, canEdit, selectedVersion]);
+  }, [filePath, cachedFileContent, isCachedFileLoading, cachedFileError, fileRetryAttempt, getUnsavedContent, canEdit, selectedVersion, navigateToPath]);
 
   // Cleanup blob URLs
   useEffect(() => {

@@ -28,25 +28,25 @@ NEXT_PUBLIC_ENV_MODE=LOCAL
 Install dependencies:
 
 ```bash
-bun install
+yarn install
 ```
 
 Run the development server:
 
 ```bash
-bun run dev
+yarn dev
 ```
 
 Build for production:
 
 ```bash
-bun run build
+yarn build
 ```
 
 Run the production server:
 
 ```bash
-bun run start
+yarn start
 ```
 
 ## Development Notes
