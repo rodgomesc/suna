@@ -14,6 +14,7 @@ from core.billing.subscriptions import free_tier_service
 from core.utils.suna_default_agent_service import SunaDefaultAgentService
 from core.services.supabase import DBConnection
 from core.services.email import email_service
+from core.utils.config import config, EnvMode
 
 # Main setup router (prefix="/setup")
 router = APIRouter(prefix="/setup", tags=["setup"])
@@ -82,19 +83,23 @@ async def initialize_user_account(account_id: str, email: Optional[str] = None, 
             if email and user_name:
                 _send_welcome_email_async(email, user_name)
         
-        result = await free_tier_service.auto_subscribe_to_free_tier(account_id, email)
-        
-        if not result.get('success'):
-            error_msg = result.get('error') or result.get('message', 'Unknown error')
-            if 'Already subscribed' in error_msg or 'already' in error_msg.lower():
-                logger.info(f"[SETUP] User {account_id} already has subscription, proceeding with agent install")
-            else:
-                logger.error(f"[SETUP] Failed to create free tier for {account_id}: {error_msg}")
-                return {
-                    'success': False,
-                    'message': f"Failed to initialize free tier: {error_msg}",
-                    'error': error_msg
-                }
+        # Skip Stripe-dependent free tier setup in local mode
+        if config.ENV_MODE == EnvMode.LOCAL:
+            logger.info(f"[SETUP] Local mode detected, skipping Stripe free tier setup for {account_id}")
+        else:
+            result = await free_tier_service.auto_subscribe_to_free_tier(account_id, email)
+            
+            if not result.get('success'):
+                error_msg = result.get('error') or result.get('message', 'Unknown error')
+                if 'Already subscribed' in error_msg or 'already' in error_msg.lower():
+                    logger.info(f"[SETUP] User {account_id} already has subscription, proceeding with agent install")
+                else:
+                    logger.error(f"[SETUP] Failed to create free tier for {account_id}: {error_msg}")
+                    return {
+                        'success': False,
+                        'message': f"Failed to initialize free tier: {error_msg}",
+                        'error': error_msg
+                    }
         
         logger.info(f"[SETUP] Installing Suna agent for {account_id}")
         suna_service = SunaDefaultAgentService(db)
