@@ -42,6 +42,10 @@ COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NEXT_OUTPUT=standalone
 
+# Increase Node.js memory limit to prevent segmentation faults during build
+# This is especially important for large codebases and the build traces collection phase
+ENV NODE_OPTIONS="--max-old-space-size=6144"
+
 RUN \
   if [ -f yarn.lock ]; then yarn run build; \
   elif [ -f package-lock.json ]; then npm run build; \
