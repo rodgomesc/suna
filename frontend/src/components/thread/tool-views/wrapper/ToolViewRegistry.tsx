@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useEffect } from 'react';
 import { ToolViewProps } from '../types';
 import { GenericToolView } from '../GenericToolView';
 import { BrowserToolView } from '../BrowserToolView';
@@ -16,8 +16,6 @@ import { CompanySearchToolView } from '../company-search-tool/CompanySearchToolV
 import { DocumentParserToolView } from '../document-parser-tool/DocumentParserToolView';
 import { SeeImageToolView } from '../see-image-tool/SeeImageToolView';
 import { WaitToolView } from '../wait-tool/WaitToolView';
-import { ExecuteDataProviderCallToolView } from '../data-provider-tool/ExecuteDataProviderCallToolView';
-import { DataProviderEndpointsToolView } from '../data-provider-tool/DataProviderEndpointsToolView';
 import { SearchMcpServersToolView } from '../search-mcp-servers/search-mcp-servers';
 import { GetAppDetailsToolView } from '../get-app-details/get-app-details';
 import { CreateCredentialProfileToolView } from '../create-credential-profile/create-credential-profile';
@@ -28,17 +26,41 @@ import { GetCredentialProfilesToolView } from '../get-credential-profiles/get-cr
 import { GetCurrentAgentConfigToolView } from '../get-current-agent-config/get-current-agent-config';
 import { TaskListToolView } from '../task-list/TaskListToolView';
 import { ListPresentationTemplatesToolView } from '../presentation-tools/ListPresentationTemplatesToolView';
-import { PresentationViewer } from '../presentation-tools/PresentationViewer';
 import { ListPresentationsToolView } from '../presentation-tools/ListPresentationsToolView';
 import { DeleteSlideToolView } from '../presentation-tools/DeleteSlideToolView';
 import { DeletePresentationToolView } from '../presentation-tools/DeletePresentationToolView';
 // import { PresentationStylesToolView } from '../presentation-tools/PresentationStylesToolView';
 import { ExportToolView } from '../presentation-tools/ExportToolView';
-import { SheetsToolView } from '../sheets-tools/sheets-tool-view';
 import { GetProjectStructureView } from '../web-dev/GetProjectStructureView';
 import { ImageEditGenerateToolView } from '../image-edit-generate-tool/ImageEditGenerateToolView';
 import { DesignerToolView } from '../designer-tool/DesignerToolView';
+import dynamic from 'next/dynamic';
 import { UploadFileToolView } from '../UploadFileToolView';
+
+// Dynamically import heavy tool views to reduce initial bundle size
+const CanvasToolView = dynamic(
+  () => import('../canvas-tool/CanvasToolView').then((mod) => mod.CanvasToolView),
+  { ssr: false }
+);
+
+// Syncfusion Spreadsheet is ~1-2 MB - must be lazy loaded
+const SpreadsheetToolView = dynamic(
+  () => import('../spreadsheet/SpreadsheetToolview').then((mod) => mod.SpreadsheetToolView),
+  { ssr: false, loading: () => <div className="p-4 text-muted-foreground">Loading spreadsheet...</div> }
+);
+
+// SheetsToolView also uses heavy charting/table libraries
+const SheetsToolView = dynamic(
+  () => import('../sheets-tools/sheets-tool-view').then((mod) => mod.SheetsToolView),
+  { ssr: false, loading: () => <div className="p-4 text-muted-foreground">Loading sheets...</div> }
+);
+
+// Presentation tools have heavy dependencies
+const PresentationViewer = dynamic(
+  () => import('../presentation-tools/PresentationViewer').then((mod) => mod.PresentationViewer),
+  { ssr: false, loading: () => <div className="p-4 text-muted-foreground">Loading presentation...</div> }
+);
+
 import { CreateNewAgentToolView } from '../create-new-agent/create-new-agent';
 import { UpdateAgentToolView } from '../update-agent/update-agent';
 import { SearchMcpServersForAgentToolView } from '../search-mcp-servers-for-agent/search-mcp-servers-for-agent';
@@ -56,9 +78,12 @@ import { ListCallsToolView } from '../vapi-call/ListCallsToolView';
 import { MonitorCallToolView } from '../vapi-call/MonitorCallToolView';
 import { WaitForCallCompletionToolView } from '../vapi-call/WaitForCallCompletionToolView';
 import { createPresentationViewerToolContent, parsePresentationSlidePath } from '../utils/presentation-utils';
+import { parseCanvasFilePath } from '../canvas-tool/_utils';
 import { KbToolView } from '../KbToolView';
 import { ExpandMessageToolView } from '../expand-message-tool/ExpandMessageToolView';
 import { RealityDefenderToolView } from '../reality-defender-tool/RealityDefenderToolView';
+import { ApifyToolView } from '../apify-tool/ToolView';
+import { FileReaderToolView } from '../file-reader-tool/FileReaderToolView';
 
 
 export type ToolViewComponent = React.ComponentType<ToolViewProps>;
@@ -79,22 +104,52 @@ const defaultRegistry: ToolViewRegistryType = {
   'create-file': FileOperationToolView,
   'delete-file': FileOperationToolView,
   'full-file-rewrite': FileOperationToolView,
-  'read-file': FileOperationToolView,
   'edit-file': FileOperationToolView,
 
   'parse-document': DocumentParserToolView,
 
+  'read-file': FileReaderToolView,
+  'read_file': FileReaderToolView,
+  'search-file': FileReaderToolView,
+  'search_file': FileReaderToolView,
+
   'str-replace': FileOperationToolView,
 
-  'web-search': WebSearchToolView,
+  
   'people-search': PeopleSearchToolView,
   'company-search': CompanySearchToolView,
   'crawl-webpage': WebCrawlToolView,
   'scrape-webpage': WebScrapeToolView,
-  'image-search': WebSearchToolView,
 
-  'execute-data-provider-call': ExecuteDataProviderCallToolView,
-  'get-data-provider-endpoints': DataProviderEndpointsToolView,
+  'image-search': WebSearchToolView,
+  'web-search': WebSearchToolView,
+
+  'spreadsheet-create': SpreadsheetToolView,
+  'spreadsheet_create': SpreadsheetToolView,
+  'spreadsheet-add-rows': SpreadsheetToolView,
+  'spreadsheet_add_rows': SpreadsheetToolView,
+  'spreadsheet-update-cell': SpreadsheetToolView,
+  'spreadsheet_update_cell': SpreadsheetToolView,
+  'spreadsheet-format-cells': SpreadsheetToolView,
+  'spreadsheet_format_cells': SpreadsheetToolView,
+  'spreadsheet-read': SpreadsheetToolView,
+  'spreadsheet_read': SpreadsheetToolView,
+
+
+  'search-apify-actors': ApifyToolView,
+  'search_apify_actors': ApifyToolView,
+  'get-actor-details': ApifyToolView,
+  'get_actor_details': ApifyToolView,
+  'request-apify-approval': ApifyToolView,
+  'request_apify_approval': ApifyToolView,
+  'approve-apify-request': ApifyToolView,
+  'approve_apify_request': ApifyToolView,
+  'get-apify-approval-status': ApifyToolView,
+  'get_apify_approval_status': ApifyToolView,
+  'run-apify-actor': ApifyToolView,
+  'run_apify_actor': ApifyToolView,
+  'get-actor-run-results': ApifyToolView,
+  'get_actor_run_results': ApifyToolView,
 
   'search-mcp-servers': SearchMcpServersToolView,
   'get-app-details': GetAppDetailsToolView,
@@ -118,6 +173,23 @@ const defaultRegistry: ToolViewRegistryType = {
   'image-edit-or-generate': ImageEditGenerateToolView,
   'designer-create-or-edit': DesignerToolView,
   'designer_create_or_edit': DesignerToolView,
+
+  'create-canvas': CanvasToolView,
+  'create_canvas': CanvasToolView,
+  'save-canvas': CanvasToolView,
+  'save_canvas': CanvasToolView,
+  'add-image-to-canvas': CanvasToolView,
+  'add_image_to_canvas': CanvasToolView,
+  'add-frame-to-canvas': CanvasToolView,
+  'add_frame_to_canvas': CanvasToolView,
+  'list-canvas-elements': CanvasToolView,
+  'list_canvas_elements': CanvasToolView,
+  'update-canvas-element': CanvasToolView,
+  'update_canvas_element': CanvasToolView,
+  'remove-canvas-element': CanvasToolView,
+  'remove_canvas_element': CanvasToolView,
+  'ai-process-canvas-element': CanvasToolView,
+  'ai_process_canvas_element': CanvasToolView,
 
   'wait': WaitToolView,
   'expand_message': ExpandMessageToolView,
@@ -149,6 +221,10 @@ const defaultRegistry: ToolViewRegistryType = {
   'analyze-sheet': SheetsToolView,
   'visualize-sheet': SheetsToolView,
   'format-sheet': SheetsToolView,
+  'spreadsheet-batch-update': SpreadsheetToolView,
+  'spreadsheet_batch_update': SpreadsheetToolView,
+  'spreadsheet-add-sheet': SpreadsheetToolView,
+  'spreadsheet_add_sheet': SpreadsheetToolView,
 
   'get-project-structure': GetProjectStructureView,
   'list-web-projects': GenericToolView,
@@ -251,15 +327,58 @@ export function useToolView(toolName: string): ToolViewComponent {
 
 
 
+// Track which tool calls have already emitted canvas refresh events
+const canvasRefreshedToolCalls = new Set<string>();
+
+// Initialize pending events map on window for cross-component communication
+if (typeof window !== 'undefined' && !(window as any).__pendingCanvasRefreshEvents) {
+  (window as any).__pendingCanvasRefreshEvents = new Map<string, number>();
+}
+
 export function ToolView({ toolCall, toolResult, ...props }: ToolViewProps) {
   // Extract tool name from function_name (handle undefined case)
   const name = toolCall?.function_name?.replace(/_/g, '-').toLowerCase() || 'default';
 
   // Get file path directly from tool call arguments (from metadata)
-  const filePath = toolCall?.arguments?.file_path || toolCall?.arguments?.target_file;
+  const filePath = toolCall?.arguments?.file_path || toolCall?.arguments?.target_file || toolCall?.arguments?.canvas_path;
+  
+  // Emit canvas refresh for ANY tool with canvas_path that completes successfully
+  const canvasPath = toolCall?.arguments?.canvas_path;
+  const toolCallId = (toolCall as any)?.tool_call_id;
+  
+  useEffect(() => {
+    // Only emit once per tool call
+    if (!toolCallId || canvasRefreshedToolCalls.has(toolCallId)) return;
+    
+    // Only emit if there's a canvas_path and tool completed successfully
+    if (canvasPath && toolResult?.success) {
+      console.log('[CANVAS_LIVE_DEBUG] ToolView emitting canvas refresh for:', {
+        toolName: name,
+        canvasPath,
+        toolCallId,
+      });
+      canvasRefreshedToolCalls.add(toolCallId);
+      
+      // Store in pending events queue for canvas-renderer to pick up
+      const pendingEvents = (window as any).__pendingCanvasRefreshEvents as Map<string, number> | undefined;
+      if (pendingEvents) {
+        pendingEvents.set(canvasPath, Date.now());
+      }
+      
+      // Small delay to ensure file is written
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('canvas-tool-updated', {
+          detail: { canvasPath, timestamp: Date.now() }
+        }));
+      }, 300);
+    }
+  }, [toolCallId, canvasPath, toolResult?.success, name]);
 
   // check if the file path is a presentation slide
   const { isValid: isPresentationSlide, presentationName, slideNumber } = parsePresentationSlidePath(filePath);
+
+  // check if the file path is a canvas file
+  const { isValid: isCanvasFile, canvasName } = parseCanvasFilePath(filePath);
 
   // define presentation-related tools that shouldn't be transformed
   const presentationTools = [
@@ -271,10 +390,28 @@ export function ToolView({ toolCall, toolResult, ...props }: ToolViewProps) {
     // 'presentation-styles',
   ]
 
+  // define canvas-related tools that shouldn't be transformed
+  const canvasTools = [
+    'create-canvas', 'create_canvas',
+    'save-canvas', 'save_canvas',
+    'add-image-to-canvas', 'add_image_to_canvas',
+    'add-frame-to-canvas', 'add_frame_to_canvas',
+    'list-canvas-elements', 'list_canvas_elements',
+    'update-canvas-element', 'update_canvas_element',
+    'remove-canvas-element', 'remove_canvas_element',
+    'ai-process-canvas-element', 'ai_process_canvas_element',
+  ]
+
   const isAlreadyPresentationTool = presentationTools.includes(name);
+  const isAlreadyCanvasTool = canvasTools.includes(name);
 
   // determine the effective tool name (must be computed before hook call)
-  const effectiveToolName = (isPresentationSlide && !isAlreadyPresentationTool) ? 'create-slide' : name;
+  let effectiveToolName = name;
+  if (isPresentationSlide && !isAlreadyPresentationTool) {
+    effectiveToolName = 'create-slide';
+  } else if (isCanvasFile && !isAlreadyCanvasTool) {
+    effectiveToolName = 'create-canvas';
+  }
 
   // use the tool view component - hook must be called unconditionally
   const ToolViewComponent = useToolView(effectiveToolName);
@@ -284,7 +421,7 @@ export function ToolView({ toolCall, toolResult, ...props }: ToolViewProps) {
     console.warn('ToolView: toolCall is undefined or missing function_name. Tool views should use structured props.');
     // Fallback to GenericToolView with error handling
     return (
-      <div className="h-full w-full max-h-full max-w-full overflow-hidden min-w-0 min-h-0" style={{ contain: 'strict' }}>
+      <div className="h-full w-full max-h-full max-w-full overflow-hidden min-w-0 min-h-0" style={{ contain: 'layout style' }}>
         <GenericToolView toolCall={toolCall} toolResult={toolResult} {...props} />
       </div>
     );
@@ -294,15 +431,40 @@ export function ToolView({ toolCall, toolResult, ...props }: ToolViewProps) {
   let modifiedToolResult = toolResult;
   if (isPresentationSlide && filePath && presentationName && slideNumber && !isAlreadyPresentationTool && toolResult) {
     const viewerContent = createPresentationViewerToolContent(presentationName, filePath, slideNumber);
+    console.log('[ToolViewRegistry] Detected presentation slide in file operation:', {
+      toolName: name,
+      filePath,
+      presentationName,
+      slideNumber,
+      viewerContent: JSON.parse(viewerContent),
+    });
     modifiedToolResult = {
       ...toolResult,
       output: viewerContent,
     };
   }
 
+  // if the file path is a canvas file, we need to modify the tool result for CanvasToolView
+  if (isCanvasFile && filePath && canvasName && !isAlreadyCanvasTool && toolResult) {
+    const canvasViewerContent = JSON.stringify({
+      result: {
+        output: JSON.stringify({
+          canvas_name: canvasName,
+          canvas_path: filePath,
+        }),
+        success: true
+      },
+      tool_name: 'canvas-viewer'
+    });
+    modifiedToolResult = {
+      ...toolResult,
+      output: canvasViewerContent,
+    };
+  }
+
   // Wrap all tool views in a container with CSS containment to prevent overflow
   return (
-    <div className="h-full w-full max-h-full max-w-full overflow-auto min-w-0 min-h-0" style={{ contain: 'layout style' }}>
+    <div className="h-full w-full max-h-full max-w-full overflow-hidden min-w-0 min-h-0" style={{ contain: 'layout style' }}>
       <ToolViewComponent toolCall={toolCall} toolResult={modifiedToolResult} {...props} />
     </div>
   );

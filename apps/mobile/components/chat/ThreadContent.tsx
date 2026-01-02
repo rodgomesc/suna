@@ -1,5 +1,5 @@
 import React, { useMemo, useCallback } from 'react';
-import { View, Pressable, Linking, Text as RNText, TextInput, Platform } from 'react-native';
+import { View, Pressable, Linking, Text as RNText, TextInput, Platform, ScrollView } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 
 // Only import ContextMenu on native platforms (iOS/Android)
@@ -141,7 +141,7 @@ function preprocessTextOnlyToolsLocal(content: string): string {
 
 interface MarkdownContentProps {
   content: string;
-  handleToolClick?: (assistantMessageId: string | null, toolName: string) => void;
+  handleToolClick?: (assistantMessageId: string | null, toolName: string, toolCallId?: string) => void;
   messageId?: string | null;
   threadId?: string;
   onFilePress?: (filePath: string) => void;
@@ -516,39 +516,152 @@ const ToolCard = React.memo(function ToolCard({
   );
 });
 
+// Define streamable tools for mobile (matching frontend)
+const MOBILE_STREAMABLE_TOOLS = {
+  FILE_OPERATIONS: new Set([
+    'Creating File', 'Rewriting File', 'AI File Edit', 'Editing Text', 'Editing File', 'Deleting File',
+  ]),
+  COMMAND_TOOLS: new Set([
+    'Executing Command', 'Checking Command Output', 'Terminating Command', 'Listing Commands',
+  ]),
+  OTHER_STREAMABLE: new Set([
+    'Creating Presentation', 'Creating Presentation Outline', 'Searching Web', 'Crawling Website',
+  ]),
+};
+
+const isStreamableToolMobile = (toolName: string): boolean => {
+  return Object.values(MOBILE_STREAMABLE_TOOLS).some(toolSet => toolSet.has(toolName));
+};
+
 const StreamingToolCallIndicator = React.memo(function StreamingToolCallIndicator({
   toolCall,
   toolName,
+  showExpanded = false,
+  onPress,
 }: {
-  toolCall: { function_name?: string; arguments?: Record<string, any> | string } | null;
+  toolCall: { function_name?: string; arguments?: Record<string, any> | string; completed?: boolean; tool_result?: any; tool_call_id?: string } | null;
   toolName: string;
+  showExpanded?: boolean;
+  onPress?: () => void;
 }) {
-  // Extract display parameter using the exact same logic as getToolCallDisplayParam
-  const paramDisplay = useMemo(() => {
-    if (!toolCall?.arguments) return '';
+  const scrollViewRef = React.useRef<any>(null);
+  
+  // Check if tool is completed (has tool_result or completed flag)
+  // tool_result can be an object with success/output/error, or just a truthy value
+  const isCompleted = toolCall?.completed === true || 
+                     (toolCall?.tool_result !== undefined && 
+                      toolCall?.tool_result !== null &&
+                      (typeof toolCall.tool_result === 'object' || Boolean(toolCall.tool_result)));
+  
+  // Extract display parameter and streaming content
+  const { paramDisplay, streamingContent } = useMemo(() => {
+    if (!toolCall?.arguments) return { paramDisplay: '', streamingContent: '' };
     let args: Record<string, any> = {};
     if (typeof toolCall.arguments === 'string') {
       try {
         args = JSON.parse(toolCall.arguments);
       } catch {
-        args = {};
+        // For partial JSON, just use the raw string as content
+        return { 
+          paramDisplay: '', 
+          streamingContent: toolCall.arguments 
+        };
       }
     } else {
       args = toolCall.arguments;
     }
-    return args.file_path || args.path || args.command || args.query || args.url || '';
-  }, [toolCall]);
+    
+    const param = args.file_path || args.path || args.command || args.query || args.url || args.slide_number?.toString() || '';
+    
+    // Extract streamable content based on tool type
+    let content = '';
+    const displayName = getUserFriendlyToolName(toolName);
+    
+    if (MOBILE_STREAMABLE_TOOLS.FILE_OPERATIONS.has(displayName)) {
+      content = args.file_contents || args.code_edit || args.content || '';
+    } else if (MOBILE_STREAMABLE_TOOLS.COMMAND_TOOLS.has(displayName)) {
+      content = args.command || '';
+    } else if (displayName === 'Creating Presentation' || displayName === 'Creating Presentation Outline') {
+      // For presentations, show slide content
+      content = args.content || args.title || args.slide_content || JSON.stringify(args, null, 2);
+    } else {
+      // For other tools, show JSON representation
+      content = Object.keys(args).length > 0 ? JSON.stringify(args, null, 2) : '';
+    }
+    
+    return { paramDisplay: param, streamingContent: content };
+  }, [toolCall, toolName]);
 
   const displayName = toolName ? getUserFriendlyToolName(toolName) : 'Using Tool';
   const IconComponent = toolName ? getToolIcon(toolName) : CircleDashed;
+  const shouldShowContent = showExpanded && isStreamableToolMobile(displayName) && streamingContent.length > 0;
 
-  // Use the exact same style as ToolCard when isLoading=true
-  return (
-    <Pressable
-      disabled
-      className="flex-row items-center gap-3 rounded-3xl border border-border bg-card p-3">
+  // Auto-scroll to bottom when content changes
+  React.useEffect(() => {
+    if (scrollViewRef.current && shouldShowContent) {
+      scrollViewRef.current.scrollToEnd?.({ animated: false });
+    }
+  }, [streamingContent, shouldShowContent]);
+
+  // Expanded card with streaming content
+  if (shouldShowContent) {
+    const cardContent = (
+      <View className="rounded-3xl border border-border bg-card overflow-hidden">
+        {/* Header */}
+        <View className="flex-row items-center gap-3 p-3 border-b border-border">
+          <View className="h-8 w-8 items-center justify-center rounded-xl border border-border bg-background">
+            <Icon as={IconComponent} size={16} className="text-primary" />
+          </View>
+          <View className="flex-1">
+            <Text className="mb-0.5 font-roobert-medium text-sm text-foreground">{displayName}</Text>
+            {paramDisplay && (
+              <Text className="text-xs text-muted-foreground" numberOfLines={1}>
+                {paramDisplay}
+              </Text>
+            )}
+          </View>
+          {isCompleted ? (
+            <Icon as={CheckCircle2} size={16} className="text-emerald-500" />
+          ) : (
+            <Icon as={CircleDashed} size={16} className="animate-spin text-primary" />
+          )}
+        </View>
+        
+        {/* Streaming content */}
+        <ScrollView
+          ref={scrollViewRef}
+          style={{ maxHeight: 200 }}
+          showsVerticalScrollIndicator={true}
+        >
+          <View className="p-3">
+            <Text
+              className="text-xs text-foreground font-roobert-mono"
+              style={{ fontFamily: 'monospace' }}
+            >
+              {streamingContent}
+            </Text>
+          </View>
+        </ScrollView>
+      </View>
+    );
+
+    // Make clickable when completed
+    if (isCompleted && onPress) {
+      return (
+        <Pressable onPress={onPress} className="active:opacity-80">
+          {cardContent}
+        </Pressable>
+      );
+    }
+
+    return cardContent;
+  }
+
+  // Simple indicator - matches finished ToolCard style exactly
+  const indicatorContent = (
+    <View className="flex-row items-center gap-3 rounded-3xl border border-border bg-card p-3">
       <View className="h-8 w-8 items-center justify-center rounded-xl border border-border bg-background">
-        <Icon as={CircleDashed} size={16} className="animate-spin text-primary" />
+        <Icon as={IconComponent} size={16} className="text-primary" />
       </View>
       <View className="flex-1">
         <Text className="mb-0.5 font-roobert-medium text-sm text-foreground">{displayName}</Text>
@@ -558,8 +671,24 @@ const StreamingToolCallIndicator = React.memo(function StreamingToolCallIndicato
           </Text>
         )}
       </View>
-    </Pressable>
+      {isCompleted ? (
+        <Icon as={CheckCircle2} size={16} className="text-emerald-500" />
+      ) : (
+        <Icon as={CircleDashed} size={16} className="animate-spin text-primary" />
+      )}
+    </View>
   );
+
+  // Make clickable when completed
+  if (isCompleted && onPress) {
+    return (
+      <Pressable onPress={onPress} className="active:opacity-80">
+        {indicatorContent}
+      </Pressable>
+    );
+  }
+
+  return indicatorContent;
 });
 
 interface ThreadContentProps {
@@ -567,7 +696,7 @@ interface ThreadContentProps {
   streamingTextContent?: string;
   streamingToolCall?: UnifiedMessage | null;
   agentStatus: 'idle' | 'running' | 'connecting' | 'error';
-  handleToolClick?: (assistantMessageId: string | null, toolName: string) => void;
+  handleToolClick?: (assistantMessageId: string | null, toolName: string, toolCallId?: string) => void;
   onFilePress?: (filePath: string) => void;
   onToolPress?: (toolMessages: ToolMessagePair[], initialIndex: number) => void;
   streamHookStatus?: string;
@@ -863,8 +992,250 @@ export const ThreadContent: React.FC<ThreadContentProps> = React.memo(
       [allToolMessages, onToolPress, navigateToToolCall]
     );
 
+    // Handler for clicking streaming tool calls - finds or creates tool message pairs
+    const handleStreamingToolCallPress = useCallback(
+      (toolCall: any, assistantMessageId: string | null) => {
+        console.log(`[ThreadContent] 🔘 Tool call card clicked: ${toolCall?.tool_call_id} (${toolCall?.function_name})`, {
+          hasToolResult: !!toolCall?.tool_result,
+          toolResultType: typeof toolCall?.tool_result,
+          toolResultKeys: toolCall?.tool_result && typeof toolCall.tool_result === 'object' 
+            ? Object.keys(toolCall.tool_result) 
+            : null,
+          completed: toolCall?.completed,
+        });
+        
+        if (!toolCall?.tool_call_id || !onToolPress) {
+          console.log(`[ThreadContent] ❌ Early return: missing tool_call_id or onToolPress`);
+          return;
+        }
+
+        // First, try to find existing tool message in messages array
+        const existingToolMessage = messages.find((msg) => {
+          if (msg.type !== 'tool') return false;
+          const metadata = safeJsonParse<ParsedMetadata>(msg.metadata, {});
+          return metadata.tool_call_id === toolCall.tool_call_id;
+        });
+        
+        console.log(`[ThreadContent] 🔍 Existing tool message found: ${!!existingToolMessage}`);
+
+        if (existingToolMessage) {
+          // Tool message exists - find or create the pair
+          const existingPair = allToolMessages.find(
+            (pair) => pair.toolMessage.message_id === existingToolMessage.message_id
+          );
+          
+          if (existingPair) {
+            const clickedIndex = allToolMessages.findIndex(
+              (p) => p.toolMessage.message_id === existingToolMessage.message_id
+            );
+            if (clickedIndex >= 0) {
+              onToolPress(allToolMessages, clickedIndex);
+              navigateToToolCall(clickedIndex);
+            }
+          } else {
+            // Create pair from existing messages
+            // Need to ensure assistant message has the specific tool call
+            let assistantMsg = streamingToolCall || messages.find(
+              (msg) => msg.message_id === assistantMessageId || 
+                       (msg.type === 'assistant' && assistantMessageId === null)
+            ) || null;
+            
+            // Get tool_call_id from the existing tool message
+            const toolMetadata = safeJsonParse<ParsedMetadata>(existingToolMessage.metadata, {});
+            const toolCallId = toolMetadata.tool_call_id;
+            
+            // Create focused assistant message with only the specific tool call
+            if (assistantMsg && toolCallId) {
+              const assistantMetadata = safeJsonParse<ParsedMetadata>(assistantMsg.metadata, {});
+              const allToolCalls = assistantMetadata.tool_calls || [];
+              const specificToolCall = allToolCalls.find((tc: any) => tc.tool_call_id === toolCallId);
+              
+              if (specificToolCall) {
+                assistantMsg = {
+                  ...assistantMsg,
+                  metadata: JSON.stringify({
+                    ...assistantMetadata,
+                    tool_calls: [specificToolCall], // Only include the specific tool call
+                  }),
+                };
+              } else if (streamingToolCall) {
+                // Try streamingToolCall if main assistant message doesn't have it
+                const streamingMetadata = safeJsonParse<ParsedMetadata>(streamingToolCall.metadata, {});
+                const streamingToolCalls = streamingMetadata.tool_calls || [];
+                const streamingSpecificToolCall = streamingToolCalls.find((tc: any) => tc.tool_call_id === toolCallId);
+                
+                if (streamingSpecificToolCall) {
+                  assistantMsg = {
+                    ...streamingToolCall,
+                    metadata: JSON.stringify({
+                      ...streamingMetadata,
+                      tool_calls: [streamingSpecificToolCall],
+                    }),
+                  };
+                }
+              }
+            }
+            
+            const newPair: ToolMessagePair = {
+              assistantMessage: assistantMsg,
+              toolMessage: existingToolMessage,
+            };
+            
+            const toolMetadataForLog = safeJsonParse<ParsedMetadata>(existingToolMessage.metadata, {});
+            console.log(`[ThreadContent] 🎯 Creating pair from existing messages:`, {
+              hasAssistantMsg: !!assistantMsg,
+              assistantMsgId: assistantMsg?.message_id,
+              assistantToolCalls: assistantMsg ? safeJsonParse<ParsedMetadata>(assistantMsg.metadata, {}).tool_calls?.length : 0,
+              toolMessageId: existingToolMessage.message_id,
+              toolCallId: toolCallId,
+              toolMessageHasResult: !!toolMetadataForLog.result,
+              toolMessageResultKeys: toolMetadataForLog.result ? Object.keys(toolMetadataForLog.result) : null,
+            });
+            
+            onToolPress([newPair], 0);
+            navigateToToolCall(0);
+          }
+        } else if (toolCall.tool_result) {
+          // Tool message doesn't exist yet - create synthetic tool message from streaming data
+          // Find or create an assistant message with the specific tool call
+          let assistantMsg = streamingToolCall || messages.find(
+            (msg) => msg.message_id === assistantMessageId || 
+                     (msg.type === 'assistant' && assistantMessageId === null)
+          ) || null;
+
+          // Ensure the assistant message has the specific tool call we need
+          // extractToolCall() without toolCallId returns the first tool call,
+          // so we need to create a focused assistant message with only this tool call
+          if (assistantMsg) {
+            const assistantMetadata = safeJsonParse<ParsedMetadata>(assistantMsg.metadata, {});
+            const allToolCalls = assistantMetadata.tool_calls || [];
+            const specificToolCall = allToolCalls.find((tc: any) => tc.tool_call_id === toolCall.tool_call_id);
+            
+            // If we found the specific tool call, create a focused assistant message with only this tool call
+            if (specificToolCall) {
+              assistantMsg = {
+                ...assistantMsg,
+                metadata: JSON.stringify({
+                  ...assistantMetadata,
+                  tool_calls: [specificToolCall], // Only include the specific tool call
+                }),
+              };
+            } else if (streamingToolCall) {
+              // Try streamingToolCall
+              const streamingMetadata = safeJsonParse<ParsedMetadata>(streamingToolCall.metadata, {});
+              const streamingToolCalls = streamingMetadata.tool_calls || [];
+              const streamingSpecificToolCall = streamingToolCalls.find((tc: any) => tc.tool_call_id === toolCall.tool_call_id);
+              
+              if (streamingSpecificToolCall) {
+                assistantMsg = {
+                  ...streamingToolCall,
+                  metadata: JSON.stringify({
+                    ...streamingMetadata,
+                    tool_calls: [streamingSpecificToolCall], // Only include the specific tool call
+                  }),
+                };
+              }
+            }
+          } else if (streamingToolCall) {
+            // Create focused assistant message from streamingToolCall
+            const streamingMetadata = safeJsonParse<ParsedMetadata>(streamingToolCall.metadata, {});
+            const streamingToolCalls = streamingMetadata.tool_calls || [];
+            const specificToolCall = streamingToolCalls.find((tc: any) => tc.tool_call_id === toolCall.tool_call_id);
+            
+            if (specificToolCall) {
+              assistantMsg = {
+                ...streamingToolCall,
+                metadata: JSON.stringify({
+                  ...streamingMetadata,
+                  tool_calls: [specificToolCall], // Only include the specific tool call
+                }),
+              };
+            }
+          }
+
+          // Extract tool result - tool_result is already the result object from metadata
+          const toolResult = toolCall.tool_result;
+          console.log(`[ThreadContent] 📦 Extracting tool result:`, {
+            toolResult,
+            toolResultType: typeof toolResult,
+            hasOutput: toolResult?.output !== undefined,
+            hasSuccess: toolResult?.success !== undefined,
+            toolResultKeys: toolResult && typeof toolResult === 'object' ? Object.keys(toolResult) : null,
+          });
+          
+          // tool_result should already have { output, success } structure from useAgentStream
+          const resultOutput = toolResult?.output !== undefined 
+            ? toolResult.output 
+            : (typeof toolResult === 'object' && toolResult !== null && !toolResult.output && !toolResult.success
+                ? toolResult  // If it's an object without output/success, use it as output
+                : toolResult);
+          const resultSuccess = toolResult?.success !== undefined 
+            ? toolResult.success 
+            : true;
+          
+          console.log(`[ThreadContent] ✅ Extracted result:`, {
+            resultOutput,
+            resultOutputType: typeof resultOutput,
+            resultSuccess,
+          });
+          
+          // Create content in legacy format for tools that might parse from content
+          // Some tools parse from content, so include both formats
+          const toolResultContent = {
+            tool_name: toolCall.function_name?.replace(/_/g, '-') || 'unknown',
+            parameters: typeof toolCall.arguments === 'string' 
+              ? (() => { try { return JSON.parse(toolCall.arguments); } catch { return {}; } })()
+              : (toolCall.arguments || {}),
+            result: {
+              output: resultOutput,
+              success: resultSuccess,
+            },
+          };
+          
+          const syntheticToolMessage: UnifiedMessage = {
+            type: 'tool',
+            message_id: `streaming-tool-${toolCall.tool_call_id}`,
+            content: JSON.stringify(toolResultContent),
+            metadata: JSON.stringify({
+              tool_call_id: toolCall.tool_call_id,
+              function_name: toolCall.function_name,
+              assistant_message_id: assistantMsg?.message_id || assistantMessageId,
+              result: {
+                output: resultOutput,
+                success: resultSuccess,
+              },
+            }),
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            thread_id: assistantMsg?.thread_id || '',
+            sequence: Infinity,
+            is_llm_message: false,
+          };
+
+          const syntheticPair: ToolMessagePair = {
+            assistantMessage: assistantMsg,
+            toolMessage: syntheticToolMessage,
+          };
+          
+          console.log(`[ThreadContent] 🎯 Creating synthetic pair:`, {
+            hasAssistantMsg: !!assistantMsg,
+            assistantMsgId: assistantMsg?.message_id,
+            assistantToolCalls: assistantMsg ? safeJsonParse<ParsedMetadata>(assistantMsg.metadata, {}).tool_calls?.length : 0,
+            syntheticToolMessageId: syntheticToolMessage.message_id,
+            syntheticToolMessageType: syntheticToolMessage.type,
+            syntheticToolMessageContent: syntheticToolMessage.content?.substring(0, 100),
+            syntheticToolMessageMetadata: syntheticToolMessage.metadata?.substring(0, 200),
+          });
+          
+          onToolPress([syntheticPair], 0);
+          navigateToToolCall(0);
+        }
+      },
+      [messages, allToolMessages, onToolPress, navigateToToolCall, streamingToolCall]
+    );
+
     return (
-      <View className="flex-1 pt-4">
+      <View className="flex-1 pt-4" pointerEvents="box-none">
         {groupedMessages.map((group, groupIndex) => {
           if (group.type === 'user') {
             const message = group.messages[0];
@@ -1182,42 +1553,36 @@ export const ThreadContent: React.FC<ThreadContentProps> = React.memo(
                         return null;
                       }
 
-                      // For other tools, render tool call indicator with spinning icon
-                      // Only hide if we can confirm the completed tool call is already rendered
+                      // For other tools, render tool call indicators with spinning icon
+                      // Render ALL tool calls (streaming + completed) - don't filter out completed ones
+                      // The StreamingToolCallIndicator component handles completed state correctly
                       if (toolCalls.length > 0) {
-                        const firstToolCall = toolCalls[0];
-                        const toolName = firstToolCall.function_name?.replace(/_/g, '-') || '';
-                        const toolCallId = firstToolCall.tool_call_id;
-
-                        // Check if this tool call has already been completed and rendered
-                        // Look for a tool message in the current group with matching tool_call_id
-                        const currentGroupToolMessages = group.messages.filter(
-                          (m) => m.type === 'tool'
+                        // Get assistant message ID from streamingToolCall or find from group
+                        const assistantMsgId = streamingToolCall?.message_id || 
+                          group.messages.find(m => m.type === 'assistant')?.message_id || 
+                          null;
+                        
+                        return (
+                          <View className="flex-col gap-2">
+                            {toolCalls.map((tc: any, tcIndex: number) => {
+                              const toolName = tc.function_name?.replace(/_/g, '-') || '';
+                              const isCompleted = tc.completed === true || 
+                                (tc.tool_result !== undefined && 
+                                 tc.tool_result !== null &&
+                                 (typeof tc.tool_result === 'object' || Boolean(tc.tool_result)));
+                              
+                              return (
+                                <StreamingToolCallIndicator
+                                  key={tc.tool_call_id || `streaming-tool-${tcIndex}`}
+                                  toolCall={tc}
+                                  toolName={toolName}
+                                  showExpanded={false}
+                                  onPress={isCompleted ? () => handleStreamingToolCallPress(tc, assistantMsgId) : undefined}
+                                />
+                              );
+                            })}
+                          </View>
                         );
-
-                        // Check if any tool message in this group matches the streaming tool call
-                        const matchingCompletedTool = currentGroupToolMessages.some(
-                          (toolMsg: UnifiedMessage) => {
-                            const toolMetadata = safeJsonParse<ParsedMetadata>(
-                              toolMsg.metadata,
-                              {}
-                            );
-                            return toolMetadata.tool_call_id === toolCallId;
-                          }
-                        );
-
-                        // Only show streaming indicator if no matching completed tool is found
-                        if (!matchingCompletedTool) {
-                          return (
-                            <StreamingToolCallIndicator
-                              toolCall={firstToolCall}
-                              toolName={toolName}
-                            />
-                          );
-                        }
-
-                        // If matching completed tool exists, don't render streaming indicator
-                        return null;
                       }
 
                       // Fallback if no tool calls found
@@ -1229,7 +1594,21 @@ export const ThreadContent: React.FC<ThreadContentProps> = React.memo(
                     (agentStatus === 'running' || agentStatus === 'connecting') &&
                     !streamingTextContent &&
                     !streamingToolCall &&
-                    (streamHookStatus === 'streaming' || streamHookStatus === 'connecting') && (
+                    (streamHookStatus === 'streaming' || streamHookStatus === 'connecting') &&
+                    (() => {
+                      // Check if any message in this group already has ASK or COMPLETE
+                      const hasAskOrComplete = group.messages.some((msg) => {
+                        if (msg.type !== 'assistant') return false;
+                        try {
+                          const metadata = safeJsonParse<ParsedMetadata>(msg.metadata, {});
+                          const toolCalls = metadata.tool_calls || [];
+                          return toolCalls.some((tc) => isAskOrCompleteTool(tc.function_name));
+                        } catch {
+                          return false;
+                        }
+                      });
+                      return !hasAskOrComplete;
+                    })() && (
                       <View className="mt-2">
                         <AgentLoader />
                       </View>

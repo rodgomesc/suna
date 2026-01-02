@@ -56,7 +56,7 @@ class ThreadAnalytics(BaseModel):
     thread_id: str
     project_id: Optional[str] = None
     project_name: Optional[str] = None
-    project_category: Optional[str] = None
+    project_categories: Optional[List[str]] = None  # Changed to array
     account_id: Optional[str] = None
     user_email: Optional[str] = None
     message_count: int
@@ -418,25 +418,116 @@ async def browse_threads(
         has_message_filter = min_messages is not None or max_messages is not None
         has_category_filter = category is not None
         
+        # EMAIL SEARCH PATH: Query threads directly by account_id (no limit)
+        # This must come first to avoid the 1000 thread limit in filtered path
+        if search_email:
+            return await _browse_threads_by_email(
+                client, pagination_params, search_email,
+                min_messages, max_messages, date_from, date_to, sort_by, sort_order
+            )
+        
         # If filtering by message count or category without date range, default to last 7 days
         if (has_message_filter or has_category_filter) and not date_from:
             date_from = (datetime.now(BERLIN_TZ) - timedelta(days=7)).strftime('%Y-%m-%d')
         
         # SIMPLE PATH: No message/email/category filter - paginate directly from DB
-        if not has_message_filter and not search_email and not has_category_filter:
+        if not has_message_filter and not has_category_filter:
             return await _browse_threads_simple(
                 client, pagination_params, date_from, date_to, sort_by, sort_order
             )
         
-        # FILTERED PATH: Need to check message counts, email, or category
+        # FILTERED PATH: Need to check message counts or category
         return await _browse_threads_filtered(
             client, pagination_params, min_messages, max_messages,
-            search_email, category, date_from, date_to, sort_by, sort_order
+            None, category, date_from, date_to, sort_by, sort_order  # search_email already handled above
         )
         
     except Exception as e:
         logger.error(f"Failed to browse threads: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve threads")
+
+
+async def _browse_threads_by_email(
+    client, params: PaginationParams, search_email: str,
+    min_messages: Optional[int], max_messages: Optional[int],
+    date_from: Optional[str], date_to: Optional[str],
+    sort_by: str, sort_order: str
+) -> PaginatedResponse[ThreadAnalytics]:
+    """Email search path: Find account by email, then query ALL threads for that account."""
+    
+    # First, find the account_id for this email using auth.users
+    try:
+        account_result = await client.rpc('get_user_account_by_email', {'email_input': search_email}).execute()
+        if not account_result.data:
+            # No user found with this email
+            return await PaginationService.paginate_with_total_count(
+                items=[], total_count=0, params=params
+            )
+        
+        target_account_id = account_result.data.get('id')
+        if not target_account_id:
+            return await PaginationService.paginate_with_total_count(
+                items=[], total_count=0, params=params
+            )
+    except Exception as e:
+        logger.warning(f"Failed to find account by email '{search_email}': {e}")
+        return await PaginationService.paginate_with_total_count(
+            items=[], total_count=0, params=params
+        )
+    
+    # Build query for threads by this account (no arbitrary limit!)
+    base_query = client.from_('threads').select(
+        'thread_id, project_id, account_id, is_public, created_at, updated_at, user_message_count, total_message_count'
+    ).eq('account_id', target_account_id)
+    
+    if date_from:
+        base_query = base_query.gte('created_at', date_from)
+    if date_to:
+        base_query = base_query.lte('created_at', date_to)
+    
+    # Apply message count filters if specified
+    if min_messages is not None:
+        base_query = base_query.gte('user_message_count', min_messages)
+    if max_messages is not None:
+        base_query = base_query.lte('user_message_count', max_messages)
+    
+    # Get total count for this user
+    count_query = client.from_('threads').select('thread_id', count='exact').eq('account_id', target_account_id)
+    if date_from:
+        count_query = count_query.gte('created_at', date_from)
+    if date_to:
+        count_query = count_query.lte('created_at', date_to)
+    if min_messages is not None:
+        count_query = count_query.gte('user_message_count', min_messages)
+    if max_messages is not None:
+        count_query = count_query.lte('user_message_count', max_messages)
+    
+    count_result = await count_query.execute()
+    total_count = count_result.count or 0
+    
+    if total_count == 0:
+        return await PaginationService.paginate_with_total_count(
+            items=[], total_count=0, params=params
+        )
+    
+    # Get paginated threads for this user
+    offset = (params.page - 1) * params.page_size
+    
+    if sort_by == 'created_at':
+        base_query = base_query.order('created_at', desc=(sort_order == 'desc'))
+    elif sort_by == 'updated_at':
+        base_query = base_query.order('updated_at', desc=(sort_order == 'desc'))
+    
+    base_query = base_query.range(offset, offset + params.page_size - 1)
+    threads_result = await base_query.execute()
+    page_threads = threads_result.data or []
+    
+    # Enrich and return
+    result = await _enrich_threads(client, page_threads)
+    
+    return await PaginationService.paginate_with_total_count(
+        items=result, total_count=total_count, params=params
+    )
 
 
 async def _browse_threads_simple(
@@ -499,14 +590,18 @@ async def _browse_threads_filtered(
     # When filtering by category, use database function for efficient JOIN with pagination
     # This fetches only the records we need (e.g., 15) instead of 1000
     if category:
-        # Build date parameters for RPC
+        # Build date parameters for RPC using Berlin timezone (consistent with category distribution)
         date_from_param = None
         date_to_param = None
         
         if date_from:
-            date_from_param = f"{date_from}T00:00:00Z" if 'T' not in date_from else date_from
+            # Parse date and convert to Berlin timezone start of day
+            from_dt = datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=BERLIN_TZ) if 'T' not in date_from else datetime.fromisoformat(date_from)
+            date_from_param = from_dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
         if date_to:
-            date_to_param = f"{date_to}T23:59:59.999999Z" if 'T' not in date_to else date_to
+            # Parse date and convert to Berlin timezone end of day
+            to_dt = datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=BERLIN_TZ) if 'T' not in date_to else datetime.fromisoformat(date_to)
+            date_to_param = to_dt.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat()
         
         # Calculate offset for pagination
         offset = (params.page - 1) * params.page_size
@@ -541,17 +636,8 @@ async def _browse_threads_filtered(
         logger.debug(f"Category filter via RPC: category={category}, page={params.page}, fetched {len(page_threads)} of {total_count} total")
         
         # Enrich threads with project/user data and return directly
+        # Note: Email search is handled separately in _browse_threads_by_email before this function
         enriched_threads = await _enrich_threads(client, page_threads)
-        
-        # Handle email search if specified (filter enriched results)
-        if search_email and enriched_threads:
-            search_lower = search_email.lower()
-            enriched_threads = [
-                t for t in enriched_threads
-                if t.user_email and search_lower in t.user_email.lower()
-            ]
-            # Adjust total count for email filter (approximate)
-            total_count = len(enriched_threads) if len(enriched_threads) < params.page_size else total_count
         
         return await PaginationService.paginate_with_total_count(
             items=enriched_threads, total_count=total_count, params=params
@@ -582,6 +668,7 @@ async def _browse_threads_filtered(
         )
     
     # Filter by message count only (category already filtered via JOIN)
+    # Note: Email search is handled separately in _browse_threads_by_email
     filtered_threads = []
     for thread in all_threads:
         user_msg_count = thread.get('user_message_count') or 0
@@ -592,27 +679,6 @@ async def _browse_threads_filtered(
             continue
         
         filtered_threads.append(thread)
-    
-    # Filter by email if specified
-    if search_email:
-        account_ids = list(set(t['account_id'] for t in filtered_threads if t.get('account_id')))
-        if account_ids:
-            emails_data = await batch_query_in(
-                client=client,
-                table_name='billing_customers',
-                select_fields='account_id, email',
-                in_field='account_id',
-                in_values=account_ids,
-                schema='basejump'
-            )
-            account_emails = {e['account_id']: e['email'] for e in emails_data}
-            
-            search_lower = search_email.lower()
-            filtered_threads = [
-                t for t in filtered_threads
-                if t.get('account_id') and 
-                   account_emails.get(t['account_id'], '').lower().find(search_lower) >= 0
-            ]
     
     total_count = len(filtered_threads)
     
@@ -656,17 +722,39 @@ async def _enrich_threads(client, threads: List[Dict]) -> List[ThreadAnalytics]:
     
     async def fetch_emails():
         if not account_ids:
-            return []
-        result = await client.schema('basejump').from_('billing_customers').select(
+            return {}
+        
+        # First try billing_customers (fast path for users with billing)
+        billing_result = await client.schema('basejump').from_('billing_customers').select(
             'account_id, email'
         ).in_('account_id', account_ids).execute()
-        return result.data or []
+        
+        account_emails = {e['account_id']: e['email'] for e in (billing_result.data or [])}
+        
+        # For accounts without billing email, get from auth.users via RPC
+        missing_account_ids = [aid for aid in account_ids if aid not in account_emails]
+        if missing_account_ids:
+            # Get primary_owner_user_id for missing accounts
+            accounts_result = await client.schema('basejump').from_('accounts').select(
+                'id, primary_owner_user_id'
+            ).in_('id', missing_account_ids).execute()
+            
+            for acc in (accounts_result.data or []):
+                if acc.get('primary_owner_user_id'):
+                    try:
+                        email_result = await client.rpc('get_user_email', {'user_id': acc['primary_owner_user_id']}).execute()
+                        if email_result.data:
+                            account_emails[acc['id']] = email_result.data
+                    except Exception as e:
+                        logger.debug(f"Could not get email for account {acc['id']}: {e}")
+        
+        return account_emails
     
     async def fetch_projects():
         if not project_ids:
             return []
         result = await client.from_('projects').select(
-            'project_id, name, category'
+            'project_id, name, categories'
         ).in_('project_id', project_ids).execute()
         return result.data or []
     
@@ -688,13 +776,16 @@ async def _enrich_threads(client, threads: List[Dict]) -> List[ThreadAnalytics]:
             elif isinstance(content, str):
                 thread_first_messages[tid] = content
     
-    account_emails = {e['account_id']: e['email'] for e in emails_data}
+    # emails_data is already a dict {account_id: email} from fetch_emails()
+    account_emails = emails_data
     
     project_names = {}
     project_categories = {}
     for p in projects_data:
         project_names[p['project_id']] = p['name']
-        project_categories[p['project_id']] = p.get('category', 'Other')
+        # Use categories array, default to ['Uncategorized'] if empty
+        cats = p.get('categories') or []
+        project_categories[p['project_id']] = cats if cats else ['Uncategorized']
     
     # Build result
     result = []
@@ -705,7 +796,7 @@ async def _enrich_threads(client, threads: List[Dict]) -> List[ThreadAnalytics]:
             thread_id=tid,
             project_id=thread.get('project_id'),
             project_name=project_names.get(thread.get('project_id')),
-            project_category=project_categories.get(thread.get('project_id')),
+            project_categories=project_categories.get(thread.get('project_id')),
             account_id=thread.get('account_id'),
             user_email=account_emails.get(thread.get('account_id')),
             message_count=thread_total_counts.get(tid, 0),
@@ -950,10 +1041,17 @@ async def get_category_distribution(
         end_of_day = selected_date.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat()
         
         # Use database function for efficient GROUP BY aggregation (bypasses row limits)
-        result = await client.rpc('get_project_category_distribution', {
-            'start_date': start_of_day,
-            'end_date': end_of_day
-        }).execute()
+        # Run both queries in parallel
+        result, count_result = await asyncio.gather(
+            client.rpc('get_project_category_distribution', {
+                'start_date': start_of_day,
+                'end_date': end_of_day
+            }).execute(),
+            # Get actual project count (not sum of categories which overcounts multi-category projects)
+            client.from_('projects').select('project_id', count='exact').gte(
+                'created_at', start_of_day
+            ).lte('created_at', end_of_day).limit(1).execute()
+        )
         
         if not result.data:
             return {
@@ -964,12 +1062,13 @@ async def get_category_distribution(
         
         # Build distribution from aggregated results
         distribution = {}
-        total_projects = 0
         for row in result.data:
             category = row.get('category', 'Uncategorized')
             count = row.get('count', 0)
             distribution[category] = count
-            total_projects += count
+        
+        # Use actual distinct project count
+        total_projects = count_result.count or 0
         
         return {
             "distribution": distribution,
@@ -1109,19 +1208,35 @@ async def get_conversion_funnel(
 # ARR WEEKLY ACTUALS ENDPOINTS
 # ============================================================================
 
+class FieldOverrides(BaseModel):
+    """Tracks which fields have been manually overridden by admin.
+    When a field is True, its value should NOT be overwritten by Stripe/API data."""
+    views: Optional[bool] = False
+    signups: Optional[bool] = False
+    new_paid: Optional[bool] = False
+    churn: Optional[bool] = False
+    subscribers: Optional[bool] = False
+    mrr: Optional[bool] = False
+    arr: Optional[bool] = False
+
+
 class WeeklyActualData(BaseModel):
     week_number: int
     week_start_date: str  # YYYY-MM-DD
+    platform: str = 'web'  # 'web' (auto-sync) or 'app' (manual/RevenueCat)
     views: Optional[int] = 0
     signups: Optional[int] = 0
     new_paid: Optional[int] = 0
+    churn: Optional[int] = 0
     subscribers: Optional[int] = 0
     mrr: Optional[float] = 0
     arr: Optional[float] = 0
+    overrides: Optional[FieldOverrides] = None  # Tracks which fields are locked
 
 
 class WeeklyActualsResponse(BaseModel):
-    actuals: Dict[int, WeeklyActualData]
+    # Key is "{week_number}_{platform}" e.g. "1_web", "1_app"
+    actuals: Dict[str, WeeklyActualData]
 
 
 @router.get("/arr/signups")
@@ -1298,6 +1413,220 @@ async def get_new_paid_by_date(
         raise HTTPException(status_code=500, detail="Failed to get new paid subscriptions")
 
 
+async def _fetch_churn_from_stripe(start_ts: int, end_ts: int) -> Dict[str, Dict[str, int]]:
+    """
+    Fetch churn data from Stripe for a timestamp range.
+    Returns dict with 'deleted' and 'downgrade' counts by date.
+    """
+    async def fetch_deleted_churns() -> Dict[str, int]:
+        """Fetch subscription.deleted events for paid subscriptions."""
+        churn_counts: Dict[str, int] = {}
+        has_more = True
+        starting_after = None
+        
+        while has_more:
+            params = {
+                "type": "customer.subscription.deleted",
+                "created": {"gte": start_ts, "lte": end_ts},
+                "limit": 100,
+            }
+            if starting_after:
+                params["starting_after"] = starting_after
+            
+            result = await stripe.Event.list_async(**params)
+            
+            for event in result.data:
+                sub = event.data.object
+                metadata = sub.get("metadata", {}) or {}
+                
+                # Skip free tier
+                if metadata.get("tier") == "free":
+                    continue
+                
+                # Check if it had actual price > $0
+                items = sub.get("items", {}).get("data", [])
+                is_paid = any(
+                    (item.get("price", {}).get("unit_amount", 0) or 0) > 0
+                    for item in items
+                )
+                
+                if is_paid:
+                    event_date = datetime.fromtimestamp(event.created, tz=BERLIN_TZ).strftime('%Y-%m-%d')
+                    churn_counts[event_date] = churn_counts.get(event_date, 0) + 1
+            
+            has_more = result.has_more
+            starting_after = result.data[-1].id if has_more and result.data else None
+        
+        return churn_counts
+    
+    async def fetch_downgrade_churns() -> Dict[str, int]:
+        """Fetch subscription.updated events where amount dropped from >0 to 0."""
+        churn_counts: Dict[str, int] = {}
+        has_more = True
+        starting_after = None
+        
+        while has_more:
+            params = {
+                "type": "customer.subscription.updated",
+                "created": {"gte": start_ts, "lte": end_ts},
+                "limit": 100,
+            }
+            if starting_after:
+                params["starting_after"] = starting_after
+            
+            result = await stripe.Event.list_async(**params)
+            
+            for event in result.data:
+                sub = event.data.object
+                previous = event.data.get("previous_attributes", {}) or {}
+                
+                # Skip if items didn't change
+                if "items" not in previous:
+                    continue
+                
+                # Get current amount
+                current_items = sub.get("items", {}).get("data", [])
+                current_amount = sum(
+                    (item.get("price", {}).get("unit_amount", 0) or 0)
+                    for item in current_items
+                )
+                
+                # Skip if current is not $0
+                if current_amount != 0:
+                    continue
+                
+                # Get previous amount from previous_attributes.items
+                prev_items_data = previous.get("items", {})
+                prev_items = prev_items_data.get("data", []) if isinstance(prev_items_data, dict) else []
+                
+                prev_amount = sum(
+                    (item.get("price", {}).get("unit_amount", 0) or 0)
+                    for item in prev_items
+                )
+                
+                # Count as churn if previous amount > 0 and current = 0
+                if prev_amount > 0:
+                    event_date = datetime.fromtimestamp(event.created, tz=BERLIN_TZ).strftime('%Y-%m-%d')
+                    churn_counts[event_date] = churn_counts.get(event_date, 0) + 1
+            
+            has_more = result.has_more
+            starting_after = result.data[-1].id if has_more and result.data else None
+        
+        return churn_counts
+    
+    # Run both queries in parallel
+    deleted_churns, downgrade_churns = await asyncio.gather(
+        fetch_deleted_churns(),
+        fetch_downgrade_churns()
+    )
+    
+    return {"deleted": deleted_churns, "downgrade": downgrade_churns}
+
+
+@router.get("/arr/churn")
+async def get_churn_by_date(
+    date_from: str = Query(..., description="Start date YYYY-MM-DD"),
+    date_to: str = Query(..., description="End date YYYY-MM-DD"),
+    admin: dict = Depends(require_super_admin)
+) -> Dict[str, Any]:
+    """
+    Get churned subscriber counts grouped by date for a date range.
+    Uses database cache for historical data, only fetches from Stripe for today.
+    Super admin only.
+    """
+    try:
+        stripe.api_key = config.STRIPE_SECRET_KEY
+        db = DBConnection()
+        client = await db.client
+        
+        # Parse dates
+        start_date = datetime.strptime(date_from, "%Y-%m-%d").date()
+        end_date = datetime.strptime(date_to, "%Y-%m-%d").date()
+        today = datetime.now(BERLIN_TZ).date()
+        
+        # Cap end date to today
+        if end_date > today:
+            end_date = today
+        
+        # 1. Get cached data from database
+        cached_result = await client.from_('arr_daily_churn').select(
+            'churn_date, deleted_count, downgrade_count'
+        ).gte('churn_date', date_from).lte('churn_date', end_date.isoformat()).execute()
+        
+        cached_dates = {}
+        for row in cached_result.data or []:
+            cached_dates[row['churn_date']] = {
+                'deleted': row['deleted_count'] or 0,
+                'downgrade': row['downgrade_count'] or 0
+            }
+        
+        # 2. Find dates that need fetching from Stripe
+        # - Any date not in cache (except future dates)
+        # - Today (always refresh since it's still updating)
+        dates_to_fetch = []
+        current = start_date
+        while current <= end_date:
+            date_str = current.isoformat()
+            if date_str not in cached_dates or current == today:
+                dates_to_fetch.append(current)
+            current += timedelta(days=1)
+        
+        # 3. Fetch missing dates from Stripe (if any)
+        if dates_to_fetch:
+            # Group consecutive dates into ranges for efficiency
+            fetch_start = min(dates_to_fetch)
+            fetch_end = max(dates_to_fetch)
+            
+            fetch_start_dt = datetime.combine(fetch_start, datetime.min.time()).replace(tzinfo=BERLIN_TZ)
+            fetch_end_dt = datetime.combine(fetch_end, datetime.max.time().replace(microsecond=0)).replace(tzinfo=BERLIN_TZ)
+            
+            start_ts = int(fetch_start_dt.timestamp())
+            end_ts = int(fetch_end_dt.timestamp())
+            
+            logger.debug(f"Fetching churn from Stripe for {fetch_start} to {fetch_end}")
+            stripe_data = await _fetch_churn_from_stripe(start_ts, end_ts)
+            
+            # 4. Store new data in database (upsert)
+            for date in dates_to_fetch:
+                date_str = date.isoformat()
+                deleted = stripe_data["deleted"].get(date_str, 0)
+                downgrade = stripe_data["downgrade"].get(date_str, 0)
+                
+                # Update cache dict
+                cached_dates[date_str] = {'deleted': deleted, 'downgrade': downgrade}
+                
+                # Upsert to database (skip today - don't cache incomplete data)
+                if date != today:
+                    await client.from_('arr_daily_churn').upsert({
+                        'churn_date': date_str,
+                        'deleted_count': deleted,
+                        'downgrade_count': downgrade
+                    }, on_conflict='churn_date').execute()
+        
+        # 5. Build response
+        churn_by_date: Dict[str, int] = {}
+        for date_str, counts in cached_dates.items():
+            total = counts['deleted'] + counts['downgrade']
+            if total > 0:
+                churn_by_date[date_str] = total
+        
+        total = sum(churn_by_date.values())
+        
+        return {
+            "date_from": date_from,
+            "date_to": date_to,
+            "churn_by_date": churn_by_date,
+            "total": total
+        }
+        
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error getting churn by date: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to get churn data from Stripe")
+    except Exception as e:
+        logger.error(f"Failed to get churn by date: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to get churn data")
+
+
 @router.get("/arr/actuals")
 async def get_arr_weekly_actuals(
     admin: dict = Depends(require_super_admin)
@@ -1311,15 +1640,34 @@ async def get_arr_weekly_actuals(
         
         actuals = {}
         for row in result.data or []:
-            actuals[row['week_number']] = WeeklyActualData(
+            # Parse overrides from JSONB
+            overrides_data = row.get('overrides') or {}
+            overrides = FieldOverrides(
+                views=overrides_data.get('views', False),
+                signups=overrides_data.get('signups', False),
+                new_paid=overrides_data.get('new_paid', False),
+                churn=overrides_data.get('churn', False),
+                subscribers=overrides_data.get('subscribers', False),
+                mrr=overrides_data.get('mrr', False),
+                arr=overrides_data.get('arr', False),
+            )
+            
+            # Use composite key: "{week_number}_{platform}"
+            platform = row.get('platform', 'web')
+            key = f"{row['week_number']}_{platform}"
+            
+            actuals[key] = WeeklyActualData(
                 week_number=row['week_number'],
                 week_start_date=row['week_start_date'],
+                platform=platform,
                 views=row.get('views', 0) or 0,
                 signups=row.get('signups', 0) or 0,
                 new_paid=row.get('new_paid', 0) or 0,
+                churn=row.get('churn', 0) or 0,
                 subscribers=row.get('subscribers', 0) or 0,
                 mrr=float(row.get('mrr', 0) or 0),
                 arr=float(row.get('arr', 0) or 0),
+                overrides=overrides,
             )
         
         return WeeklyActualsResponse(actuals=actuals)
@@ -1333,30 +1681,69 @@ async def get_arr_weekly_actuals(
 async def update_arr_weekly_actual(
     week_number: int,
     data: WeeklyActualData,
+    platform: str = Query('web', description="Platform: 'web' or 'app'"),
     admin: dict = Depends(require_super_admin)
 ) -> WeeklyActualData:
-    """Update or create ARR weekly actual data for a specific week. Super admin only."""
+    """Update or create ARR weekly actual data for a specific week and platform. Super admin only.
+    
+    When a value is explicitly provided (non-zero), it will be marked as overridden
+    and will NOT be replaced by Stripe/API data on subsequent fetches.
+    """
     try:
+        if platform not in ('web', 'app'):
+            raise HTTPException(status_code=400, detail="Platform must be 'web' or 'app'")
+        
         db = DBConnection()
         client = await db.client
         
-        # Upsert the data
+        # Get existing overrides (if any) to merge with new ones
+        existing_result = await client.from_('arr_weekly_actuals').select('overrides').eq('week_number', week_number).eq('platform', platform).execute()
+        existing_overrides = {}
+        if existing_result.data and len(existing_result.data) > 0:
+            existing_overrides = existing_result.data[0].get('overrides') or {}
+        
+        # Merge overrides: if data.overrides is provided, use it; otherwise keep existing
+        new_overrides = existing_overrides.copy()
+        if data.overrides:
+            # Update overrides from the request
+            if data.overrides.views is not None:
+                new_overrides['views'] = data.overrides.views
+            if data.overrides.signups is not None:
+                new_overrides['signups'] = data.overrides.signups
+            if data.overrides.new_paid is not None:
+                new_overrides['new_paid'] = data.overrides.new_paid
+            if data.overrides.churn is not None:
+                new_overrides['churn'] = data.overrides.churn
+            if data.overrides.subscribers is not None:
+                new_overrides['subscribers'] = data.overrides.subscribers
+            if data.overrides.mrr is not None:
+                new_overrides['mrr'] = data.overrides.mrr
+            if data.overrides.arr is not None:
+                new_overrides['arr'] = data.overrides.arr
+        
+        # Upsert the data including overrides
         upsert_data = {
             'week_number': week_number,
             'week_start_date': data.week_start_date,
+            'platform': platform,
             'views': data.views or 0,
             'signups': data.signups or 0,
             'new_paid': data.new_paid or 0,
+            'churn': data.churn or 0,
             'subscribers': data.subscribers or 0,
             'mrr': data.mrr or 0,
             'arr': data.arr or 0,
+            'overrides': new_overrides,
         }
         
         result = await client.from_('arr_weekly_actuals').upsert(
             upsert_data,
-            on_conflict='week_number'
+            on_conflict='week_number,platform'
         ).execute()
         
+        # Return with updated overrides
+        data.platform = platform
+        data.overrides = FieldOverrides(**new_overrides)
         return data
         
     except Exception as e:
@@ -1367,20 +1754,85 @@ async def update_arr_weekly_actual(
 @router.delete("/arr/actuals/{week_number}")
 async def delete_arr_weekly_actual(
     week_number: int,
+    platform: str = Query('web', description="Platform: 'web' or 'app'"),
     admin: dict = Depends(require_super_admin)
 ) -> Dict[str, str]:
-    """Delete ARR weekly actual for a specific week. Super admin only."""
+    """Delete ARR weekly actual for a specific week and platform. Super admin only."""
     try:
+        if platform not in ('web', 'app'):
+            raise HTTPException(status_code=400, detail="Platform must be 'web' or 'app'")
+        
         db = DBConnection()
         client = await db.client
         
-        await client.from_('arr_weekly_actuals').delete().eq('week_number', week_number).execute()
+        await client.from_('arr_weekly_actuals').delete().eq('week_number', week_number).eq('platform', platform).execute()
         
-        return {"message": f"Week {week_number} actual data deleted"}
+        return {"message": f"Week {week_number} ({platform}) actual data deleted"}
         
     except Exception as e:
         logger.error(f"Failed to delete ARR weekly actual: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to delete ARR weekly actual")
+
+
+class ToggleOverrideRequest(BaseModel):
+    field: str  # One of: views, signups, new_paid, subscribers, mrr, arr
+    override: bool  # True to lock, False to unlock
+
+
+@router.patch("/arr/actuals/{week_number}/override")
+async def toggle_field_override(
+    week_number: int,
+    request: ToggleOverrideRequest,
+    platform: str = Query('web', description="Platform: 'web' or 'app'"),
+    admin: dict = Depends(require_super_admin)
+) -> Dict[str, Any]:
+    """Toggle the override status for a specific field in a week and platform.
+    
+    When override is True, the field value is 'locked' and won't be overwritten by Stripe data.
+    When override is False, the field is 'unlocked' and will use Stripe data instead.
+    Super admin only.
+    """
+    try:
+        valid_fields = ['views', 'signups', 'new_paid', 'churn', 'subscribers', 'mrr', 'arr']
+        if request.field not in valid_fields:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid field. Must be one of: {', '.join(valid_fields)}"
+            )
+        
+        if platform not in ('web', 'app'):
+            raise HTTPException(status_code=400, detail="Platform must be 'web' or 'app'")
+        
+        db = DBConnection()
+        client = await db.client
+        
+        # Get existing record
+        existing_result = await client.from_('arr_weekly_actuals').select('overrides').eq('week_number', week_number).eq('platform', platform).execute()
+        
+        if not existing_result.data or len(existing_result.data) == 0:
+            raise HTTPException(status_code=404, detail=f"Week {week_number} ({platform}) not found")
+        
+        # Update overrides
+        overrides = existing_result.data[0].get('overrides') or {}
+        overrides[request.field] = request.override
+        
+        await client.from_('arr_weekly_actuals').update({
+            'overrides': overrides
+        }).eq('week_number', week_number).eq('platform', platform).execute()
+        
+        return {
+            "week_number": week_number,
+            "platform": platform,
+            "field": request.field,
+            "override": request.override,
+            "message": f"Field '{request.field}' ({platform}) is now {'locked (manual)' if request.override else 'unlocked (sync from Stripe)'}"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to toggle field override: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to toggle field override")
 
 
 # ============================================================================
@@ -1469,3 +1921,238 @@ async def update_arr_simulator_config(
     except Exception as e:
         logger.error(f"Failed to update ARR simulator config: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to update ARR simulator config")
+
+
+# ============================================================================
+# MONTHLY ACTUALS (Direct monthly editing with override support)
+# ============================================================================
+
+class MonthlyActualData(BaseModel):
+    month_index: int  # 0=Dec 2024, 1=Jan 2025, etc.
+    month_name: str  # 'Dec 2024', 'Jan 2025', etc.
+    platform: str = 'web'  # 'web' (auto-sync) or 'app' (manual/RevenueCat)
+    views: Optional[int] = 0
+    signups: Optional[int] = 0
+    new_paid: Optional[int] = 0
+    churn: Optional[int] = 0
+    subscribers: Optional[int] = 0
+    mrr: Optional[float] = 0
+    arr: Optional[float] = 0
+    overrides: Optional[FieldOverrides] = None  # Tracks which fields are locked
+
+
+class MonthlyActualsResponse(BaseModel):
+    # Key is "{month_index}_{platform}" e.g. "0_web", "0_app"
+    actuals: Dict[str, MonthlyActualData]
+
+
+@router.get("/arr/monthly-actuals")
+async def get_arr_monthly_actuals(
+    admin: dict = Depends(require_super_admin)
+) -> MonthlyActualsResponse:
+    """Get all ARR monthly actuals for the simulator. Super admin only."""
+    try:
+        db = DBConnection()
+        client = await db.client
+        
+        result = await client.from_('arr_monthly_actuals').select('*').order('month_index').execute()
+        
+        actuals = {}
+        for row in result.data or []:
+            # Parse overrides from JSONB
+            overrides_data = row.get('overrides') or {}
+            overrides = FieldOverrides(
+                views=overrides_data.get('views', False),
+                signups=overrides_data.get('signups', False),
+                new_paid=overrides_data.get('new_paid', False),
+                churn=overrides_data.get('churn', False),
+                subscribers=overrides_data.get('subscribers', False),
+                mrr=overrides_data.get('mrr', False),
+                arr=overrides_data.get('arr', False),
+            )
+            
+            # Use composite key: "{month_index}_{platform}"
+            platform = row.get('platform', 'web')
+            key = f"{row['month_index']}_{platform}"
+            
+            actuals[key] = MonthlyActualData(
+                month_index=row['month_index'],
+                month_name=row.get('month_name', ''),
+                platform=platform,
+                views=row.get('views', 0) or 0,
+                signups=row.get('signups', 0) or 0,
+                new_paid=row.get('new_paid', 0) or 0,
+                churn=row.get('churn', 0) or 0,
+                subscribers=row.get('subscribers', 0) or 0,
+                mrr=float(row.get('mrr', 0) or 0),
+                arr=float(row.get('arr', 0) or 0),
+                overrides=overrides,
+            )
+        
+        return MonthlyActualsResponse(actuals=actuals)
+        
+    except Exception as e:
+        logger.error(f"Failed to get ARR monthly actuals: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to get ARR monthly actuals")
+
+
+@router.put("/arr/monthly-actuals/{month_index}")
+async def update_arr_monthly_actual(
+    month_index: int,
+    data: MonthlyActualData,
+    platform: str = Query('web', description="Platform: 'web' or 'app'"),
+    admin: dict = Depends(require_super_admin)
+) -> MonthlyActualData:
+    """Update or create ARR monthly actual data for a specific month and platform. Super admin only.
+    
+    When a value is explicitly provided (non-zero), it will be marked as overridden
+    and will NOT be replaced by auto-calculated data on subsequent fetches.
+    """
+    try:
+        if platform not in ('web', 'app'):
+            raise HTTPException(status_code=400, detail="Platform must be 'web' or 'app'")
+        
+        db = DBConnection()
+        client = await db.client
+        
+        # Get existing overrides (if any) to merge with new ones
+        existing_result = await client.from_('arr_monthly_actuals').select('overrides').eq('month_index', month_index).eq('platform', platform).execute()
+        existing_overrides = {}
+        if existing_result.data and len(existing_result.data) > 0:
+            existing_overrides = existing_result.data[0].get('overrides') or {}
+        
+        # Merge overrides: if data.overrides is provided, use it; otherwise keep existing
+        new_overrides = existing_overrides.copy()
+        if data.overrides:
+            # Update overrides from the request
+            if data.overrides.views is not None:
+                new_overrides['views'] = data.overrides.views
+            if data.overrides.signups is not None:
+                new_overrides['signups'] = data.overrides.signups
+            if data.overrides.new_paid is not None:
+                new_overrides['new_paid'] = data.overrides.new_paid
+            if data.overrides.churn is not None:
+                new_overrides['churn'] = data.overrides.churn
+            if data.overrides.subscribers is not None:
+                new_overrides['subscribers'] = data.overrides.subscribers
+            if data.overrides.mrr is not None:
+                new_overrides['mrr'] = data.overrides.mrr
+            if data.overrides.arr is not None:
+                new_overrides['arr'] = data.overrides.arr
+        
+        # Upsert the data including overrides
+        upsert_data = {
+            'month_index': month_index,
+            'month_name': data.month_name,
+            'platform': platform,
+            'views': data.views or 0,
+            'signups': data.signups or 0,
+            'new_paid': data.new_paid or 0,
+            'churn': data.churn or 0,
+            'subscribers': data.subscribers or 0,
+            'mrr': data.mrr or 0,
+            'arr': data.arr or 0,
+            'overrides': new_overrides,
+        }
+        
+        await client.from_('arr_monthly_actuals').upsert(
+            upsert_data, 
+            on_conflict='month_index,platform'
+        ).execute()
+        
+        return MonthlyActualData(
+            month_index=month_index,
+            month_name=data.month_name,
+            platform=platform,
+            views=data.views or 0,
+            signups=data.signups or 0,
+            new_paid=data.new_paid or 0,
+            churn=data.churn or 0,
+            subscribers=data.subscribers or 0,
+            mrr=data.mrr or 0,
+            arr=data.arr or 0,
+            overrides=FieldOverrides(**new_overrides) if new_overrides else None,
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to update ARR monthly actual: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update ARR monthly actual")
+
+
+@router.delete("/arr/monthly-actuals/{month_index}")
+async def delete_arr_monthly_actual(
+    month_index: int,
+    platform: str = Query('web', description="Platform: 'web' or 'app'"),
+    admin: dict = Depends(require_super_admin)
+) -> Dict[str, str]:
+    """Delete ARR monthly actual for a specific month and platform. Super admin only."""
+    try:
+        if platform not in ('web', 'app'):
+            raise HTTPException(status_code=400, detail="Platform must be 'web' or 'app'")
+        
+        db = DBConnection()
+        client = await db.client
+        
+        await client.from_('arr_monthly_actuals').delete().eq('month_index', month_index).eq('platform', platform).execute()
+        
+        return {"message": f"Month {month_index} ({platform}) actual data deleted"}
+        
+    except Exception as e:
+        logger.error(f"Failed to delete ARR monthly actual: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to delete ARR monthly actual")
+
+
+@router.patch("/arr/monthly-actuals/{month_index}/override")
+async def toggle_monthly_field_override(
+    month_index: int,
+    request: ToggleOverrideRequest,
+    platform: str = Query('web', description="Platform: 'web' or 'app'"),
+    admin: dict = Depends(require_super_admin)
+) -> Dict[str, Any]:
+    """Toggle the override status for a specific field in a month and platform.
+    
+    When override is True, the field value is 'locked' and won't be overwritten by calculated data.
+    When override is False, the field is 'unlocked' and will use calculated data instead.
+    Super admin only.
+    """
+    try:
+        valid_fields = ['views', 'signups', 'new_paid', 'churn', 'subscribers', 'mrr', 'arr']
+        if request.field not in valid_fields:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid field. Must be one of: {', '.join(valid_fields)}"
+            )
+        
+        if platform not in ('web', 'app'):
+            raise HTTPException(status_code=400, detail="Platform must be 'web' or 'app'")
+        
+        db = DBConnection()
+        client = await db.client
+        
+        # Get existing record
+        existing_result = await client.from_('arr_monthly_actuals').select('overrides').eq('month_index', month_index).eq('platform', platform).execute()
+        
+        if not existing_result.data or len(existing_result.data) == 0:
+            raise HTTPException(status_code=404, detail=f"Month {month_index} ({platform}) not found")
+        
+        # Update overrides
+        overrides = existing_result.data[0].get('overrides') or {}
+        overrides[request.field] = request.override
+        
+        await client.from_('arr_monthly_actuals').update({
+            'overrides': overrides
+        }).eq('month_index', month_index).eq('platform', platform).execute()
+        
+        return {
+            "month_index": month_index,
+            "platform": platform,
+            "field": request.field,
+            "override": request.override,
+            "message": f"Field '{request.field}' ({platform}) is now {'locked (manual)' if request.override else 'unlocked (auto-calculated)'}"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to toggle monthly field override: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to toggle monthly field override")

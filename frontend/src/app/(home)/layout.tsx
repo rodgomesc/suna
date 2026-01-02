@@ -1,9 +1,16 @@
-import { HomeLayoutClient } from './layout-client';
+'use client';
+
+import { Navbar } from '@/components/home/navbar';
 
 export default function HomeLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  return <HomeLayoutClient>{children}</HomeLayoutClient>;
+  return (
+    <div className="w-full relative">
+      <Navbar />
+      {children}
+    </div>
+  );
 }

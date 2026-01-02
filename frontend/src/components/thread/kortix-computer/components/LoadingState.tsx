@@ -21,7 +21,16 @@ export const LoadingState = memo(function LoadingState({
   
   if (isMobile) {
     return (
-      <DrawerContent className="h-[85vh]">
+      <DrawerContent
+        className="h-[85vh]"
+        onKeyDown={(e) => {
+          // Prevent Escape / Esc from dismissing the Drawer (Kortix Computer).
+          if (e.key === 'Escape' || e.key === 'Esc') {
+            e.preventDefault();
+            e.stopPropagation();
+          }
+        }}
+      >
         <PanelHeader
           agentName={agentName}
           onClose={onClose}
@@ -51,9 +60,7 @@ export const LoadingState = memo(function LoadingState({
               <PanelHeader
                 agentName={agentName}
                 onClose={onClose}
-                onMinimize={onClose}
                 onMaximize={() => {}}
-                showMinimize={true}
                 currentView={activeView}
                 onViewChange={setActiveView}
               />

@@ -5,11 +5,12 @@ import { useParams } from 'next/navigation';
 import { Suspense, lazy } from 'react';
 import { useAccounts } from '@/hooks/account';
 import { useAuth } from '@/components/AuthProvider';
-import { useMaintenanceNoticeQuery } from '@/hooks/edge-flags';
+import { useMaintenanceNoticeQuery, useTechnicalIssueQuery } from '@/hooks/edge-flags';
 import { useRouter } from 'next/navigation';
 import { useApiHealth } from '@/hooks/usage/use-health';
 import { useAdminRole } from '@/hooks/admin';
 import { usePresence } from '@/hooks/use-presence';
+import { featureFlags } from '@/lib/feature-flags';
 
 import { useProjects } from '@/hooks/sidebar/use-sidebar';
 import { useIsMobile } from '@/hooks/utils';
@@ -33,12 +34,24 @@ const PresentationViewerWrapper = lazy(() =>
 const OnboardingProvider = lazy(() => 
   import('@/components/onboarding/onboarding-provider').then(mod => ({ default: mod.OnboardingProvider }))
 );
-const WelcomeBonusBanner = lazy(() => 
-  import('@/components/billing/welcome-bonus-banner').then(mod => ({ default: mod.WelcomeBonusBanner }))
+const DashboardPromoBanner = lazy(() => 
+  import('@/components/home/dashboard-promo-banner').then(mod => ({ default: mod.DashboardPromoBanner }))
 );
 
 const PresenceDebug = lazy(() => 
   import('@/components/debug/presence-debug').then(mod => ({ default: mod.PresenceDebug }))
+);
+
+const KortixAppBanners = lazy(() => 
+  import('@/components/announcements/kortix-app-banners').then(mod => ({ default: mod.KortixAppBanners }))
+);
+
+const MobileAppInterstitial = lazy(() => 
+  import('@/components/announcements/mobile-app-interstitial').then(mod => ({ default: mod.MobileAppInterstitial }))
+);
+
+const TechnicalIssueBanner = lazy(() => 
+  import('@/components/announcements/technical-issue-banner').then(mod => ({ default: mod.TechnicalIssueBanner }))
 );
 
 // Skeleton shell that renders immediately for FCP
@@ -87,6 +100,7 @@ export default function DashboardLayoutContent({
   const router = useRouter();
   const isMobile = useIsMobile();
   const { data: maintenanceNotice, isLoading: maintenanceLoading } = useMaintenanceNoticeQuery();
+  const { data: technicalIssue } = useTechnicalIssueQuery();
   const {
     data: healthData,
     isLoading: isCheckingHealth,
@@ -163,9 +177,19 @@ export default function DashboardLayoutContent({
       }
     >
       <div className="relative h-full">
-        {/* Site-wide welcome bonus banner for free tier users */}
+        {/* Technical issue banner */}
+        {technicalIssue?.enabled && (
+          <Suspense fallback={null}>
+            <TechnicalIssueBanner 
+              message={technicalIssue.message}
+              statusUrl={technicalIssue.statusUrl}
+            />
+          </Suspense>
+        )}
+        
+        {/* Site-wide promo banner for free tier users */}
         <Suspense fallback={null}>
-          <WelcomeBonusBanner />
+          <DashboardPromoBanner />
         </Suspense>
         <Suspense fallback={null}>
           <AnnouncementDialog />
@@ -180,6 +204,16 @@ export default function DashboardLayoutContent({
         <Suspense fallback={null}>
           <PresentationViewerWrapper />
         </Suspense>
+        {/* Kortix App announcement banners */}
+        <Suspense fallback={null}>
+          <KortixAppBanners disableMobileAdvertising={featureFlags.disableMobileAdvertising} />
+        </Suspense>
+        {/* Mobile app install interstitial - shown on actual mobile devices */}
+        {!featureFlags.disableMobileAdvertising ? (
+          <Suspense fallback={null}>
+            <MobileAppInterstitial />
+          </Suspense>
+        ) : null}
       </div>
     </AppProviders>
   );

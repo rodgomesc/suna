@@ -98,9 +98,24 @@ class AgentRunner:
             
             cached_project = await get_cached_project_metadata(self.config.project_id)
             if not cached_project:
-                project = await self.client.table('projects').select('project_id, sandbox').eq('project_id', self.config.project_id).execute()
+                project = await self.client.table('projects').select('project_id, sandbox_resource_id').eq('project_id', self.config.project_id).execute()
                 if project.data:
-                    await set_cached_project_metadata(self.config.project_id, project.data[0].get('sandbox', {}))
+                    project_data = project.data[0]
+                    sandbox_resource_id = project_data.get('sandbox_resource_id')
+                    
+                    # Get sandbox info from resource if it exists
+                    sandbox_info = {}
+                    if sandbox_resource_id:
+                        from core.resources import ResourceService
+                        resource_service = ResourceService(self.client)
+                        resource = await resource_service.get_resource_by_id(sandbox_resource_id)
+                        if resource:
+                            sandbox_info = {
+                                'id': resource.get('external_id'),
+                                **resource.get('config', {})
+                            }
+                    
+                    await set_cached_project_metadata(self.config.project_id, sandbox_info)
             
             if hasattr(self.thread_manager, 'mcp_loader') and self.thread_manager.mcp_loader:
                 if len(self.thread_manager.mcp_loader.tool_map) == 0:
@@ -193,16 +208,34 @@ class AgentRunner:
             cached_project = await get_cached_project_metadata(self.config.project_id)
             if cached_project:
                 project_data = cached_project
+                sandbox_info = cached_project  # Cache stores sandbox metadata directly
                 logger.debug(f"⏱️ [TIMING] ⚡ Project from cache: {(time.time() - q_start) * 1000:.1f}ms")
             else:
-                project = await self.client.table('projects').select('project_id, sandbox').eq('project_id', self.config.project_id).execute()
+                from core.resources import ResourceService
+                resource_service = ResourceService(self.client)
+                
+                # Lazy migration: Migrate sandbox JSONB to resources table if needed
+                await resource_service.migrate_project_sandbox_if_needed(self.config.project_id)
+                
+                project = await self.client.table('projects').select('project_id, sandbox_resource_id').eq('project_id', self.config.project_id).execute()
                 
                 if not project.data or len(project.data) == 0:
                     raise ValueError(f"Project {self.config.project_id} not found")
                 
                 project_data = project.data[0]
+                sandbox_resource_id = project_data.get('sandbox_resource_id')
                 
-                await set_cached_project_metadata(self.config.project_id, project_data.get('sandbox', {}))
+                # Get sandbox info from resource if it exists
+                sandbox_info = {}
+                if sandbox_resource_id:
+                    resource = await resource_service.get_resource_by_id(sandbox_resource_id)
+                    if resource:
+                        sandbox_info = {
+                            'id': resource.get('external_id'),
+                            **resource.get('config', {})
+                        }
+                
+                await set_cached_project_metadata(self.config.project_id, sandbox_info)
                 logger.debug(f"⏱️ [TIMING] Project query + cache set: {(time.time() - q_start) * 1000:.1f}ms")
         else:
             parallel_start = time.time()
@@ -210,7 +243,7 @@ class AgentRunner:
             from core.runtime_cache import get_cached_project_metadata, set_cached_project_metadata
             
             thread_query = self.client.table('threads').select('account_id').eq('thread_id', self.config.thread_id).execute()
-            project_query = self.client.table('projects').select('project_id, sandbox').eq('project_id', self.config.project_id).execute()
+            project_query = self.client.table('projects').select('project_id, sandbox_resource_id').eq('project_id', self.config.project_id).execute()
             
             response, project = await asyncio.gather(thread_query, project_query)
             logger.debug(f"⏱️ [TIMING] Parallel DB queries (thread + project): {(time.time() - parallel_start) * 1000:.1f}ms")
@@ -227,10 +260,22 @@ class AgentRunner:
                 raise ValueError(f"Project {self.config.project_id} not found")
 
             project_data = project.data[0]
+            sandbox_resource_id = project_data.get('sandbox_resource_id')
             
-            await set_cached_project_metadata(self.config.project_id, project_data.get('sandbox', {}))
+            # Get sandbox info from resource if it exists
+            sandbox_info = {}
+            if sandbox_resource_id:
+                from core.resources import ResourceService
+                resource_service = ResourceService(self.client)
+                resource = await resource_service.get_resource_by_id(sandbox_resource_id)
+                if resource:
+                    sandbox_info = {
+                        'id': resource.get('external_id'),
+                        **resource.get('config', {})
+                    }
+            
+            await set_cached_project_metadata(self.config.project_id, sandbox_info)
         
-        sandbox_info = project_data.get('sandbox', {})
         if not sandbox_info.get('id'):
             logger.debug(f"No sandbox found for project {self.config.project_id}; will create lazily when needed")
         
@@ -340,7 +385,8 @@ class AgentRunner:
             'sb_shell_tool', 'sb_files_tool', 'sb_expose_tool',
             'web_search_tool', 'image_search_tool', 'sb_vision_tool', 'sb_presentation_tool', 'sb_image_edit_tool',
             'sb_kb_tool', 'sb_design_tool', 'sb_upload_file_tool',
-            'data_providers_tool', 'browser_tool', 'people_search_tool', 'company_search_tool', 
+            'browser_tool', 'people_search_tool', 'company_search_tool', 
+            'apify_tool', 'reality_defender_tool', 'vapi_voice_tool', 'paper_search_tool',
             'agent_config_tool', 'mcp_search_tool', 'credential_profile_tool', 'trigger_tool',
             'agent_creation_tool'
         ]
@@ -359,48 +405,6 @@ class AgentRunner:
         mcp_manager = MCPManager(self.thread_manager, self.account_id)
         return await mcp_manager.register_mcp_tools(self.config.agent_config)
     
-    async def _load_mcp_config_from_version(self) -> dict | None:
-        if not self.config.agent_config:
-            return None
-        
-        agent_id = self.config.agent_config.get('agent_id')
-        current_version_id = self.config.agent_config.get('current_version_id')
-        
-        if not agent_id or not current_version_id:
-            logger.error(f"❌ [MCP JIT] Missing agent_id ({agent_id}) or version_id ({current_version_id})")
-            return None
-        
-        try:
-            from core.versioning.version_service import get_version_service
-            version_service = await get_version_service()
-            
-            version = await version_service.get_version(
-                agent_id=agent_id,
-                version_id=current_version_id,
-                user_id=self.account_id
-            )
-            
-            if not version:
-                logger.error(f"❌ [MCP JIT] Version {current_version_id} not found for agent {agent_id}")
-                return None
-            
-            version_dict = version.to_dict()
-            
-            config = version_dict.get('config', {})
-            tools = config.get('tools', {})
-            
-            mcp_config = {
-                'custom_mcp': tools.get('custom_mcp', []),
-                'configured_mcps': tools.get('mcp', [])
-            }
-            
-            logger.error(f"✅ [MCP JIT] Loaded version config: custom_mcp={len(mcp_config['custom_mcp'])}, configured_mcps={len(mcp_config['configured_mcps'])}")
-            return mcp_config
-            
-        except Exception as e:
-            logger.error(f"❌ [MCP JIT] Failed to load version data: {e}", exc_info=True)
-            return None
-    
     async def run(self, cancellation_event: Optional[asyncio.Event] = None) -> AsyncGenerator[Dict[str, Any], None]:
         from core.utils.config import config
         run_start = time.time()
@@ -418,6 +422,8 @@ class AgentRunner:
             parallel_start = time.time()
             setup_tools_task = asyncio.create_task(self._setup_tools_async())
             await setup_tools_task
+
+            await self._restore_dynamic_tools()
             
             if (hasattr(self.thread_manager, 'mcp_loader') and 
                 self.config.agent_config and 
@@ -501,7 +507,7 @@ class AgentRunner:
                     yield {
                         "type": "status",
                         "status": "stopped",
-                        "message": "Agent execution cancelled"
+                        "message": "Worker execution cancelled"
                     }
                     break
 
@@ -673,6 +679,53 @@ class AgentRunner:
         if not self.config.agent_config:
             return
         
+        logger.info(f"🔍 [AGENT-MCP-DEBUG] Loading fresh MCP config from current version")
+        
+        try:
+            agent_id = self.config.agent_config.get('agent_id')
+            logger.info(f"🔍 [AGENT-MCP-DEBUG] Loading fresh config for agent_id: {agent_id}, account_id: {self.account_id}")
+            
+            from core.versioning.version_service import get_version_service
+            version_service = await get_version_service()
+            fresh_config = await version_service.get_current_mcp_config(agent_id, self.account_id)
+            
+            logger.info(f"🔍 [AGENT-MCP-DEBUG] Version service returned: {fresh_config is not None}")
+            if fresh_config:
+                logger.info(f"🔍 [AGENT-MCP-DEBUG] Fresh config keys: {list(fresh_config.keys())}")
+            else:
+                logger.warning(f"🔍 [AGENT-MCP-DEBUG] ❌ Version service returned None/empty config")
+                
+        except Exception as e:
+            logger.error(f"🔍 [AGENT-MCP-DEBUG] ❌ Failed to load fresh config via version service: {e}", exc_info=True)
+            fresh_config = None
+        
+        if fresh_config:
+            logger.info(f"🔍 [AGENT-MCP-DEBUG] ✅ Got fresh config:")
+            logger.info(f"🔍 [AGENT-MCP-DEBUG]   custom_mcp: {len(fresh_config.get('custom_mcp', []))}")
+            logger.info(f"🔍 [AGENT-MCP-DEBUG]   configured_mcps: {len(fresh_config.get('configured_mcps', []))}")
+            
+            for i, mcp in enumerate(fresh_config.get('custom_mcp', [])):
+                logger.info(f"🔍 [AGENT-MCP-DEBUG] fresh custom_mcp[{i}]: name={mcp.get('name')}, toolkit_slug={mcp.get('toolkit_slug')}")
+            
+            for i, mcp in enumerate(fresh_config.get('configured_mcps', [])):
+                logger.info(f"🔍 [AGENT-MCP-DEBUG] fresh configured_mcp[{i}]: name={mcp.get('name')}, toolkit_slug={mcp.get('toolkit_slug')}")
+            
+            old_custom_mcps = len(self.config.agent_config.get("custom_mcps", []))
+            old_configured_mcps = len(self.config.agent_config.get("configured_mcps", []))
+            
+            agent_config_update = {
+                'custom_mcps': fresh_config.get('custom_mcp', []),
+                'configured_mcps': fresh_config.get('configured_mcps', [])
+            }
+            self.config.agent_config.update(agent_config_update)
+            
+            logger.info(f"🔍 [AGENT-MCP-DEBUG] Updated agent config: old custom={old_custom_mcps}, new custom={len(self.config.agent_config.get('custom_mcps', []))}")
+            logger.info(f"🔍 [AGENT-MCP-DEBUG] Updated agent config: old configured={old_configured_mcps}, new configured={len(self.config.agent_config.get('configured_mcps', []))}")
+            
+            self.thread_manager.tool_registry.invalidate_mcp_cache()
+        else:
+            logger.warning(f"🔍 [AGENT-MCP-DEBUG] ❌ No fresh config loaded")
+        
         custom_mcps = self.config.agent_config.get("custom_mcps", [])
         configured_mcps = self.config.agent_config.get("configured_mcps", [])
         
@@ -692,8 +745,17 @@ class AgentRunner:
                 
                 if not hasattr(self.thread_manager, 'mcp_loader') or self.thread_manager.mcp_loader is None:
                     self.thread_manager.mcp_loader = MCPJITLoader(mcp_config)
-                
-                await self.thread_manager.mcp_loader.build_tool_map(cache_only=cache_only)
+                    await self.thread_manager.mcp_loader.build_tool_map(cache_only=cache_only)
+                else:
+                    if fresh_config:
+                        logger.info(f"🔍 [AGENT-MCP-DEBUG] ✅ Using FRESH config for loader rebuild")
+                        logger.info(f"🔍 [AGENT-MCP-DEBUG] Fresh config: custom_mcp={len(fresh_config.get('custom_mcp', []))}, configured_mcps={len(fresh_config.get('configured_mcps', []))}")
+                        await self.thread_manager.mcp_loader.rebuild_tool_map(fresh_config)
+                    else:
+                        logger.error(f"🔍 [AGENT-MCP-DEBUG] ❌ CRITICAL: No fresh config available! Skipping rebuild to avoid stale data")
+                        logger.error(f"🔍 [AGENT-MCP-DEBUG] This means the system prompt will have stale MCP tools!")
+                    if cache_only:
+                        await self.thread_manager.mcp_loader.build_tool_map(cache_only=cache_only)
                 
                 stats = self.thread_manager.mcp_loader.get_activation_stats()
                 toolkits = await self.thread_manager.mcp_loader.get_toolkits()
@@ -731,3 +793,62 @@ class AgentRunner:
         if removed_count > 0:
             logger.info(f"⚡ [MCP JIT] Registry cleaned: {tools_before} → {tools_after} tools ({removed_count} legacy tools removed)")
 
+    async def _restore_dynamic_tools(self) -> None:
+        """Restore dynamically loaded tools from previous turns"""
+        try:
+            restore_start = time.time()
+            
+            result = await self.client.table('threads')\
+                .select('metadata')\
+                .eq('thread_id', self.config.thread_id)\
+                .single()\
+                .execute()
+            
+            if not result.data:
+                logger.debug("📦 [DYNAMIC TOOLS] No thread metadata found")
+                return
+            
+            metadata = result.data.get('metadata') or {}
+            dynamic_tools = metadata.get('dynamic_tools', [])
+            
+            if not dynamic_tools:
+                logger.debug("📦 [DYNAMIC TOOLS] No previously loaded tools to restore")
+                return
+            
+            logger.info(f"📦 [DYNAMIC TOOLS] Restoring {len(dynamic_tools)} previously loaded tools: {dynamic_tools}")
+            
+            from core.jit import JITLoader
+            jit_config = getattr(self.thread_manager, 'jit_config', None)
+            
+            activation_tasks = [
+                JITLoader.activate_tool(tool_name, self.thread_manager, self.config.project_id, jit_config=jit_config)
+                for tool_name in dynamic_tools
+            ]
+            
+            activation_results = await asyncio.gather(*activation_tasks, return_exceptions=True)
+            
+            from core.jit.result_types import ActivationSuccess, ActivationError
+            
+            restored = []
+            failed = []
+            
+            for tool_name, result in zip(dynamic_tools, activation_results):
+                if isinstance(result, ActivationSuccess):
+                    restored.append(tool_name)
+                else:
+                    failed.append(tool_name)
+                    if isinstance(result, Exception):
+                        logger.warning(f"⚠️  [DYNAMIC TOOLS] Failed to restore '{tool_name}': {result}")
+                    elif isinstance(result, ActivationError):
+                        logger.warning(f"⚠️  [DYNAMIC TOOLS] {result.to_user_message()}")
+            
+            elapsed_ms = (time.time() - restore_start) * 1000
+            
+            if restored:
+                logger.info(f"✅ [DYNAMIC TOOLS] Restored {len(restored)} tools in {elapsed_ms:.1f}ms: {restored}")
+            
+            if failed:
+                logger.warning(f"⚠️  [DYNAMIC TOOLS] Failed to restore {len(failed)} tools: {failed}")
+        
+        except Exception as e:
+            logger.error(f"❌ [DYNAMIC TOOLS] Failed to restore tools: {e}", exc_info=True)

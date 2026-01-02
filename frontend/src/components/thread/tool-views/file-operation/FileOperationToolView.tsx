@@ -1,7 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
-  CheckCircle,
-  AlertTriangle,
   ExternalLink,
   Loader2,
   Code,
@@ -25,8 +23,15 @@ import {
   getFileTypeFromExtension,
 } from '@/components/file-editors';
 import { UnifiedMarkdown } from '@/components/markdown';
-import { CsvRenderer, XlsxRenderer } from '@/components/file-renderers';
+import { HtmlRenderer, JsonRenderer } from '@/components/file-renderers';
+import dynamic from 'next/dynamic';
 import { cn } from '@/lib/utils';
+
+// Lazy load SpreadsheetViewer as it imports Syncfusion (~1-2 MB)
+const SpreadsheetViewer = dynamic(
+  () => import('../spreadsheet/SpreadsheetViewer').then((mod) => mod.SpreadsheetViewer),
+  { ssr: false, loading: () => <div className="p-4 text-muted-foreground">Loading spreadsheet...</div> }
+);
 import { useTheme } from 'next-themes';
 import { constructHtmlPreviewUrl } from '@/lib/utils/url';
 import {
@@ -53,7 +58,6 @@ import {
   isFileType,
   hasLanguageHighlighting,
   splitContentIntoLines,
-  generateEmptyLines,
   generateLineDiff,
   calculateDiffStats,
   type FileOperation,
@@ -68,7 +72,6 @@ import { PresentationSlidePreview } from '../presentation-tools/PresentationSlid
 import { usePresentationViewerStore } from '@/stores/presentation-viewer-store';
 import { useKortixComputerStore } from '@/stores/kortix-computer-store';
 
-// Improved diff view components for str-replace operations
 const UnifiedDiffView: React.FC<{ lineDiff: LineDiff[]; fileName?: string }> = ({ lineDiff, fileName }) => (
   <div className="font-mono text-[13px] leading-relaxed">
     {lineDiff.map((line, i) => (
@@ -176,20 +179,12 @@ const SplitDiffView: React.FC<{ lineDiff: LineDiff[] }> = ({ lineDiff }) => (
   </div>
 );
 
-// Helper functions for presentation slide detection
-// Helper function to check if a filepath is a presentation slide file
 function isPresentationSlideFile(filepath: string): boolean {
-  // Match patterns like:
-  // - presentations/[name]/slide_01.html
-  // - /workspace/presentations/[name]/slide_01.html
-  // - ./presentations/[name]/slide_01.html
   const presentationPattern = /presentations\/([^\/]+)\/slide_\d+\.html$/i;
   return presentationPattern.test(filepath);
 }
 
-// Helper function to extract presentation name from filepath
 function extractPresentationName(filepath: string): string | null {
-  // Match presentations/[name]/ anywhere in the path
   const match = filepath.match(/presentations\/([^\/]+)\//i);
   return match ? match[1] : null;
 }
@@ -239,186 +234,207 @@ export function FileOperationToolView({
   const config = configs[operation];
   const Icon = config.icon;
 
-  let filePath: string | null = null;
-  let fileContent: string | null = null;
-  let oldStr: string | null = null;
-  let newStr: string | null = null;
-
-  // Extract file path from arguments (from metadata)
-  filePath = args.file_path || args.target_file || args.path || null;
+  const rawStreamingSource = toolCall.rawArguments || streamingText;
   
-  // Extract str-replace specific arguments
-  if (isStrReplace) {
-    oldStr = args.old_str || args.old_string || null;
-    newStr = args.new_str || args.new_string || null;
-  }
+  const [throttledStreamingSource, setThrottledStreamingSource] = useState(rawStreamingSource);
+  const throttleTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastUpdateRef = useRef<number>(0);
   
-  // Also try to get file path from output first (more reliable for completed operations)
-  if (output && typeof output === 'object' && output !== null) {
-    if (!filePath && (output.file_path || output.path)) {
-      filePath = output.file_path || output.path;
+  useEffect(() => {
+    if (!isStreaming) {
+      setThrottledStreamingSource(rawStreamingSource);
+      return;
     }
-  }
-
-  // STREAMING: Extract content from live streaming JSON arguments
-  if (isStreaming && streamingText) {
-    try {
-      // Try parsing as complete JSON first
-      const parsed = JSON.parse(streamingText);
-
-      // Extract based on operation type
-      if (operation === 'create' || operation === 'rewrite') {
-        if (parsed.file_contents) {
-          fileContent = parsed.file_contents;
-        }
-      } else if (operation === 'edit') {
-        if (parsed.code_edit) {
-          fileContent = parsed.code_edit;
-        }
-      } else if (isStrReplace) {
-        if (parsed.old_str || parsed.old_string) {
-          oldStr = parsed.old_str || parsed.old_string;
-        }
-        if (parsed.new_str || parsed.new_string) {
-          newStr = parsed.new_str || parsed.new_string;
-        }
+    
+    const now = Date.now();
+    const timeSinceLastUpdate = now - lastUpdateRef.current;
+    
+    if (timeSinceLastUpdate >= 100) {
+      setThrottledStreamingSource(rawStreamingSource);
+      lastUpdateRef.current = now;
+    } else {
+      if (throttleTimeoutRef.current) {
+        clearTimeout(throttleTimeoutRef.current);
       }
-
-      // Extract file_path if not already set
-      if (!filePath && parsed.file_path) {
-        filePath = parsed.file_path;
+      throttleTimeoutRef.current = setTimeout(() => {
+        setThrottledStreamingSource(rawStreamingSource);
+        lastUpdateRef.current = Date.now();
+      }, 100 - timeSinceLastUpdate);
+    }
+    
+    return () => {
+      if (throttleTimeoutRef.current) {
+        clearTimeout(throttleTimeoutRef.current);
       }
-    } catch (e) {
-      // JSON incomplete - extract partial content
-      if (operation === 'create' || operation === 'rewrite') {
-        // Find the start of file_contents value
-        const startMatch = streamingText.match(/"file_contents"\s*:\s*"/);
-        if (startMatch) {
-          const startIndex = startMatch.index! + startMatch[0].length;
-          // Extract everything after "file_contents": " until we hit the end or a closing quote
-          let rawContent = streamingText.substring(startIndex);
+    };
+  }, [rawStreamingSource, isStreaming]);
+  
+  const streamingSource = isStreaming ? throttledStreamingSource : rawStreamingSource;
 
-          // Try to find the end quote (but it might not exist yet during streaming)
-          const endQuoteMatch = rawContent.match(/(?<!\\)"/);
-          if (endQuoteMatch) {
-            rawContent = rawContent.substring(0, endQuoteMatch.index);
-          }
+  const extractedContent = useMemo(() => {
+    let filePath: string | null = args.file_path || args.target_file || args.path || null;
+    let fileContent: string | null = null;
+    let oldStr: string | null = null;
+    let newStr: string | null = null;
 
-          // Unescape JSON sequences like \n, \t, \\, \"
-          try {
-            fileContent = JSON.parse('"' + rawContent + '"');
-          } catch {
-            // If unescaping fails, replace common escapes manually
-            fileContent = rawContent
-              .replace(/\\n/g, '\n')
-              .replace(/\\t/g, '\t')
-              .replace(/\\r/g, '\r')
-              .replace(/\\"/g, '"')
-              .replace(/\\\\/g, '\\');
-          }
-        }
-      } else if (operation === 'edit') {
-        const startMatch = streamingText.match(/"code_edit"\s*:\s*"/);
-        if (startMatch) {
-          const startIndex = startMatch.index! + startMatch[0].length;
-          let rawContent = streamingText.substring(startIndex);
+    if (isStrReplace) {
+      oldStr = args.old_str || args.old_string || null;
+      newStr = args.new_str || args.new_string || null;
+    }
 
-          const endQuoteMatch = rawContent.match(/(?<!\\)"/);
-          if (endQuoteMatch) {
-            rawContent = rawContent.substring(0, endQuoteMatch.index);
-          }
-
-          try {
-            fileContent = JSON.parse('"' + rawContent + '"');
-          } catch {
-            fileContent = rawContent
-              .replace(/\\n/g, '\n')
-              .replace(/\\t/g, '\t')
-              .replace(/\\r/g, '\r')
-              .replace(/\\"/g, '"')
-              .replace(/\\\\/g, '\\');
-          }
-        }
-      } else if (isStrReplace) {
-        // Extract old_str
-        const oldStrMatch = streamingText.match(/"(?:old_str|old_string)"\s*:\s*"/);
-        if (oldStrMatch) {
-          const startIndex = oldStrMatch.index! + oldStrMatch[0].length;
-          let rawContent = streamingText.substring(startIndex);
-          const endQuoteMatch = rawContent.match(/(?<!\\)"/);
-          if (endQuoteMatch) {
-            rawContent = rawContent.substring(0, endQuoteMatch.index);
-          }
-          try {
-            oldStr = JSON.parse('"' + rawContent + '"');
-          } catch {
-            oldStr = rawContent.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\r').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-          }
-        }
-        // Extract new_str
-        const newStrMatch = streamingText.match(/"(?:new_str|new_string)"\s*:\s*"/);
-        if (newStrMatch) {
-          const startIndex = newStrMatch.index! + newStrMatch[0].length;
-          let rawContent = streamingText.substring(startIndex);
-          const endQuoteMatch = rawContent.match(/(?<!\\)"/);
-          if (endQuoteMatch) {
-            rawContent = rawContent.substring(0, endQuoteMatch.index);
-          }
-          try {
-            newStr = JSON.parse('"' + rawContent + '"');
-          } catch {
-            newStr = rawContent.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\r').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-          }
-        }
-      }
-
-      // Extract file_path from partial JSON
-      if (!filePath) {
-        const pathMatch = streamingText.match(/"file_path"\s*:\s*"([^"]+)"/);
-        if (pathMatch) {
-          filePath = pathMatch[1];
-        }
+    if (output && typeof output === 'object' && output !== null) {
+      if (!filePath && (output.file_path || output.path)) {
+        filePath = output.file_path || output.path;
       }
     }
-  }  // Fallback: Extract content from args (for completed operations)
-  if (!fileContent) {
-    fileContent = args.file_contents || args.code_edit || args.updated_content || null;
-  }
 
-  // Override with output if available
-  if (output) {
-    if (typeof output === 'object' && output !== null) {
-      fileContent = output.file_content || output.content || output.updated_content || fileContent;
-      if (!filePath && output.file_path) {
-        filePath = output.file_path;
-      }
-      if (isStrReplace || operation === 'edit') {
-        oldStr = oldStr || output.old_str || output.old_string || output.original_content || null;
-        newStr = newStr || output.new_str || output.new_string || output.updated_content || null;
-        if (output.updated_content) {
-          fileContent = output.updated_content;
-        }
-      }
-    } else if (typeof output === 'string') {
+    if (isStreaming && streamingSource) {
       try {
-        const parsed = JSON.parse(output);
-        if (parsed.updated_content) {
-          fileContent = parsed.updated_content;
+        const parsed = JSON.parse(streamingSource);
+
+        if (operation === 'create' || operation === 'rewrite') {
+          if (parsed.file_contents) {
+            fileContent = parsed.file_contents;
+          }
+        } else if (operation === 'edit') {
+          if (parsed.code_edit) {
+            fileContent = parsed.code_edit;
+          }
+        } else if (isStrReplace) {
+          if (parsed.old_str || parsed.old_string) {
+            oldStr = parsed.old_str || parsed.old_string;
+          }
+          if (parsed.new_str || parsed.new_string) {
+            newStr = parsed.new_str || parsed.new_string;
+          }
         }
-        if (parsed.file_path && !filePath) {
+
+        if (!filePath && parsed.file_path) {
           filePath = parsed.file_path;
         }
-        if (isStrReplace || operation === 'edit') {
-          oldStr = oldStr || parsed.old_str || parsed.old_string || parsed.original_content || null;
-          newStr = newStr || parsed.new_str || parsed.new_string || parsed.updated_content || null;
-        }
       } catch (e) {
-        if (operation !== 'delete' && operation !== 'create' && operation !== 'rewrite') {
-          fileContent = output;
+        if (operation === 'create' || operation === 'rewrite') {
+          const startMatch = streamingSource.match(/"file_contents"\s*:\s*"/);
+          if (startMatch) {
+            const startIndex = startMatch.index! + startMatch[0].length;
+            let rawContent = streamingSource.substring(startIndex);
+            const endQuoteMatch = rawContent.match(/(?<!\\)"/);
+            if (endQuoteMatch) {
+              rawContent = rawContent.substring(0, endQuoteMatch.index);
+            }
+            try {
+              fileContent = JSON.parse('"' + rawContent + '"');
+            } catch {
+              fileContent = rawContent
+                .replace(/\\n/g, '\n')
+                .replace(/\\t/g, '\t')
+                .replace(/\\r/g, '\r')
+                .replace(/\\"/g, '"')
+                .replace(/\\\\/g, '\\');
+            }
+          }
+        } else if (operation === 'edit') {
+          const startMatch = streamingSource.match(/"code_edit"\s*:\s*"/);
+          if (startMatch) {
+            const startIndex = startMatch.index! + startMatch[0].length;
+            let rawContent = streamingSource.substring(startIndex);
+            const endQuoteMatch = rawContent.match(/(?<!\\)"/);
+            if (endQuoteMatch) {
+              rawContent = rawContent.substring(0, endQuoteMatch.index);
+            }
+            try {
+              fileContent = JSON.parse('"' + rawContent + '"');
+            } catch {
+              fileContent = rawContent
+                .replace(/\\n/g, '\n')
+                .replace(/\\t/g, '\t')
+                .replace(/\\r/g, '\r')
+                .replace(/\\"/g, '"')
+                .replace(/\\\\/g, '\\');
+            }
+          }
+        } else if (isStrReplace) {
+          const oldStrMatch = streamingSource.match(/"(?:old_str|old_string)"\s*:\s*"/);
+          if (oldStrMatch) {
+            const startIndex = oldStrMatch.index! + oldStrMatch[0].length;
+            let rawContent = streamingSource.substring(startIndex);
+            const endQuoteMatch = rawContent.match(/(?<!\\)"/);
+            if (endQuoteMatch) {
+              rawContent = rawContent.substring(0, endQuoteMatch.index);
+            }
+            try {
+              oldStr = JSON.parse('"' + rawContent + '"');
+            } catch {
+              oldStr = rawContent.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\r').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+            }
+          }
+          const newStrMatch = streamingSource.match(/"(?:new_str|new_string)"\s*:\s*"/);
+          if (newStrMatch) {
+            const startIndex = newStrMatch.index! + newStrMatch[0].length;
+            let rawContent = streamingSource.substring(startIndex);
+            const endQuoteMatch = rawContent.match(/(?<!\\)"/);
+            if (endQuoteMatch) {
+              rawContent = rawContent.substring(0, endQuoteMatch.index);
+            }
+            try {
+              newStr = JSON.parse('"' + rawContent + '"');
+            } catch {
+              newStr = rawContent.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\r').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+            }
+          }
+        }
+
+        if (!filePath) {
+          const pathMatch = streamingSource.match(/"file_path"\s*:\s*"([^"]+)"/);
+          if (pathMatch) {
+            filePath = pathMatch[1];
+          }
         }
       }
     }
-  }
+
+    if (!fileContent) {
+      fileContent = args.file_contents || args.code_edit || args.updated_content || null;
+    }
+
+    if (output) {
+      if (typeof output === 'object' && output !== null) {
+        fileContent = output.file_content || output.content || output.updated_content || fileContent;
+        if (!filePath && output.file_path) {
+          filePath = output.file_path;
+        }
+        if (isStrReplace || operation === 'edit') {
+          oldStr = oldStr || output.old_str || output.old_string || output.original_content || null;
+          newStr = newStr || output.new_str || output.new_string || output.updated_content || null;
+          if (output.updated_content) {
+            fileContent = output.updated_content;
+          }
+        }
+      } else if (typeof output === 'string') {
+        try {
+          const parsed = JSON.parse(output);
+          if (parsed.updated_content) {
+            fileContent = parsed.updated_content;
+          }
+          if (parsed.file_path && !filePath) {
+            filePath = parsed.file_path;
+          }
+          if (isStrReplace || operation === 'edit') {
+            oldStr = oldStr || parsed.old_str || parsed.old_string || parsed.original_content || null;
+            newStr = newStr || parsed.new_str || parsed.new_string || parsed.updated_content || null;
+          }
+        } catch (e) {
+          if (operation !== 'delete' && operation !== 'create' && operation !== 'rewrite') {
+            fileContent = output;
+          }
+        }
+      }
+    }
+
+    return { filePath, fileContent, oldStr, newStr };
+  }, [args, output, isStreaming, streamingSource, operation, isStrReplace]);
+
+  const { filePath, fileContent, oldStr, newStr } = extractedContent;
 
   // Generate diff data for str-replace and edit operations
   const lineDiff = React.useMemo(() => {
@@ -438,6 +454,8 @@ export function FileOperationToolView({
   const fileExtension = getFileExtension(fileName);
 
   const isHtml = isFileType.html(fileExtension);
+  const isCsv = fileExtension === 'csv' || fileExtension === 'tsv';
+  const isXlsx = fileExtension === 'xlsx' || fileExtension === 'xls';
 
   // Check if this is a presentation slide file
   const isPresentationSlide = processedFilePath ? isPresentationSlideFile(processedFilePath) : false;
@@ -458,7 +476,9 @@ export function FileOperationToolView({
 
   const language = getLanguageFromFileName(fileName);
   const hasHighlighting = hasLanguageHighlighting(language);
-  const contentLines = React.useMemo(() => splitContentIntoLines(fileContent), [fileContent]);
+  
+  // Only calculate content lines for non-streaming or when actually needed
+  const contentLines = useMemo(() => splitContentIntoLines(fileContent), [fileContent]);
 
   const htmlPreviewUrl =
     isHtml && project?.sandbox?.sandbox_url && processedFilePath
@@ -468,10 +488,10 @@ export function FileOperationToolView({
   const FileIcon = getFileIcon(fileName);
 
   // Auto-scroll refs for streaming
-  const sourceScrollRef = React.useRef<HTMLDivElement>(null);
-  const previewScrollRef = React.useRef<HTMLDivElement>(null);
-  const lastLineCountRef = React.useRef<number>(0);
-  const isUserScrollingSourceRef = React.useRef<boolean>(false);
+  const sourceScrollRef = useRef<HTMLDivElement>(null);
+  const previewScrollRef = useRef<HTMLDivElement>(null);
+  const lastLineCountRef = useRef<number>(0);
+  const isUserScrollingSourceRef = useRef<boolean>(false);
   const isUserScrollingPreviewRef = React.useRef<boolean>(false);
 
   const isNearBottom = (element: HTMLElement, threshold: number = 100): boolean => {
@@ -674,21 +694,19 @@ export function FileOperationToolView({
       );
     }
 
-    // Determine file type for rendering
     const fileType = getFileTypeFromExtension(fileName);
     const isMarkdown = fileExtension === 'md' || fileExtension === 'markdown';
-    const isCsv = fileExtension === 'csv' || fileExtension === 'tsv';
-    const isXlsx = fileExtension === 'xlsx' || fileExtension === 'xls';
+    const isJson = fileExtension === 'json';
     
-    // For HTML files with preview URL, use iframe directly (but show CodeMirror during streaming)
-    if (isHtml && htmlPreviewUrl && !isStreaming) {
+    // For HTML files, use HtmlRenderer with Preview/Code/Open buttons (but show CodeMirror during streaming)
+    if (isHtml && !isStreaming) {
       return (
         <div className="w-full max-w-full h-full overflow-hidden min-w-0">
-          <iframe
-            src={htmlPreviewUrl}
-            title={`HTML Preview of ${fileName}`}
-            className="w-full h-full border-0 max-w-full"
-            sandbox="allow-same-origin allow-scripts"
+          <HtmlRenderer
+            content={fileContent || ''}
+            previewUrl={htmlPreviewUrl || ''}
+            className="w-full h-full"
+            project={project}
           />
         </div>
       );
@@ -703,29 +721,24 @@ export function FileOperationToolView({
       );
     }
 
-    // For CSV files
-    if (isCsv) {
+    // For JSON files
+    if (isJson) {
       return (
-        <div className="p-6 flex flex-col">
-          <div className="flex-1 min-h-[400px] w-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg overflow-hidden">
-            <CsvRenderer content={processUnicodeContent(fileContent)} />
-          </div>
-        </div>
+        <JsonRenderer content={fileContent} />
       );
     }
 
-    // For XLSX files
-    if (isXlsx) {
+    // For CSV and XLSX files
+    if (isCsv || isXlsx) {
       return (
-        <div className="p-6 flex flex-col">
-          <div className="flex-1 min-h-[400px] w-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg overflow-hidden">
-            <XlsxRenderer
-              content={fileContent}
-              filePath={processedFilePath}
-              fileName={fileName}
-              project={project}
-            />
-          </div>
+        <div className="w-full h-full overflow-hidden">
+          <SpreadsheetViewer
+            filePath={filePath}
+            fileName={fileName}
+            sandboxId={project?.sandbox?.id}
+            project={project}
+            className="w-full h-full"
+          />
         </div>
       );
     }
@@ -774,26 +787,18 @@ export function FileOperationToolView({
       );
     }
 
-    // Always use file-lines rendering for consistency
-    // Add empty lines to fill viewport
-    const emptyLines = generateEmptyLines(50); // Add 50 empty lines for natural scrolling
-    const allLines = [...contentLines, ...emptyLines];
-
+    // PERFORMANCE FIX: Use CodeEditor (which uses virtualized CodeMirror) instead of
+    // creating individual DOM elements for each line. This prevents browser hangs
+    // when streaming large files.
     return (
-      <div className="w-full max-w-full table bg-white dark:bg-zinc-900 overflow-x-auto">
-        {allLines.map((line, idx) => (
-          <div
-            key={idx}
-            className={cn("table-row transition-colors", config.hoverColor)}
-          >
-            <div className="table-cell text-right pr-4 pl-4 py-0.5 text-xs text-zinc-400 dark:text-zinc-600 select-none w-14 border-r border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 flex-shrink-0">
-              {idx + 1}
-            </div>
-            <div className="table-cell pl-4 py-0.5 pr-4 text-[15px] leading-relaxed whitespace-pre-wrap break-words text-zinc-700 dark:text-zinc-300 bg-white dark:bg-zinc-900 max-w-full min-w-0">
-              {line ? processUnicodeContent(line, true) : ' '}
-            </div>
-          </div>
-        ))}
+      <div className="w-full max-w-full bg-white dark:bg-zinc-900 min-w-0">
+        <CodeEditor
+          content={processUnicodeContent(fileContent)}
+          fileName={fileName}
+          readOnly={true}
+          className="w-full max-w-full"
+          showLineNumbers={true}
+        />
       </div>
     );
   };
@@ -984,6 +989,10 @@ export function FileOperationToolView({
                 {renderFilePreview()}
               </div>
             ) : isHtml && htmlPreviewUrl && !isStreaming ? (
+              <div className="w-full max-w-full h-full relative bg-white dark:bg-zinc-900 flex-1 min-h-0 min-w-0 overflow-hidden">
+                {renderFilePreview()}
+              </div>
+            ) : (isCsv || isXlsx) ? (
               <div className="w-full max-w-full h-full relative bg-white dark:bg-zinc-900 flex-1 min-h-0 min-w-0 overflow-hidden">
                 {renderFilePreview()}
               </div>
