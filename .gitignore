@@ -234,3 +234,6 @@ apps/mobile/app-example
 
 # Infra (separate repository)
 infra/
+
+# Auto Claude data directory
+.auto-claude/

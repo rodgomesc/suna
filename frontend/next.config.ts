@@ -43,6 +43,13 @@ const nextConfig = (): NextConfig => ({
   // Webpack configuration to make Konva work with Next.js
   webpack: (config) => {
     config.externals = [...config.externals, { canvas: 'canvas' }]; // required to make Konva & react-konva work
+    // Disable Node.js crypto module for browser builds to avoid secure context errors
+    // This prevents crypto.subtle and similar APIs from failing in HTTP (non-HTTPS) contexts
+    config.resolve = config.resolve || {};
+    config.resolve.fallback = {
+      ...config.resolve.fallback,
+      crypto: false,
+    };
     return config;
   },
   

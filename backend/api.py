@@ -256,10 +256,12 @@ async def log_requests_middleware(request: Request, call_next):
 allowed_origins = ["https://www.kortix.com", "https://kortix.com", "https://www.suna.so", "https://suna.so", "http://localhost:8711", "http://127.0.0.1:8711", "https://suna-api.engravings.dev", "https://suna.engravings.dev"]
 allow_origin_regex = None
 
-# Add staging-specific origins
+# Add local development origins and enable wildcard for network access
 if config.ENV_MODE == EnvMode.LOCAL:
     allowed_origins.append("http://localhost:3000")
     allowed_origins.append("http://127.0.0.1:3000")
+    # Allow all origins in local mode for network access from other devices
+    allowed_origins = ["*"]
 
 # Add staging-specific origins
 if config.ENV_MODE == EnvMode.STAGING:

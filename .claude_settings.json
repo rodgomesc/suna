@@ -1,0 +1,34 @@
+{
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true
+  },
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Read(./**)",
+      "Write(./**)",
+      "Edit(./**)",
+      "Glob(./**)",
+      "Grep(./**)",
+      "Read(/Users/rodgomesc/workspace/personal/suna/**)",
+      "Write(/Users/rodgomesc/workspace/personal/suna/**)",
+      "Edit(/Users/rodgomesc/workspace/personal/suna/**)",
+      "Glob(/Users/rodgomesc/workspace/personal/suna/**)",
+      "Grep(/Users/rodgomesc/workspace/personal/suna/**)",
+      "Read(/Users/rodgomesc/workspace/personal/suna/.auto-claude/specs/001-explain-what-the-project-does/**)",
+      "Write(/Users/rodgomesc/workspace/personal/suna/.auto-claude/specs/001-explain-what-the-project-does/**)",
+      "Edit(/Users/rodgomesc/workspace/personal/suna/.auto-claude/specs/001-explain-what-the-project-does/**)",
+      "Bash(*)",
+      "WebFetch(*)",
+      "WebSearch(*)",
+      "mcp__context7__resolve-library-id(*)",
+      "mcp__context7__get-library-docs(*)",
+      "mcp__graphiti-memory__search_nodes(*)",
+      "mcp__graphiti-memory__search_facts(*)",
+      "mcp__graphiti-memory__add_episode(*)",
+      "mcp__graphiti-memory__get_episodes(*)",
+      "mcp__graphiti-memory__get_entity_edge(*)"
+    ]
+  }
+}
