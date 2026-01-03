@@ -18,6 +18,7 @@ import { useQuery } from '@tanstack/react-query';
 import { agentKeys } from '@/hooks/agents/keys';
 import { getAgents } from '@/hooks/agents/utils';
 import { useOptimisticFilesStore } from '@/stores/optimistic-files-store';
+import { generateUUID } from '@/lib/utils';
 
 const SunaModesPanel = lazy(() => 
   import('@/components/dashboard/suna-modes-panel').then(mod => ({ default: mod.SunaModesPanel }))
@@ -92,8 +93,8 @@ export default function MilanoPage() {
         return new File([file], normalizedName, { type: file.type });
       });
       
-      const threadId = crypto.randomUUID();
-      const projectId = crypto.randomUUID();
+      const threadId = generateUUID();
+      const projectId = generateUUID();
       const trimmedMessage = message.trim();
       
       // Note: No need to clear files/input here - navigation to new page will unmount this component

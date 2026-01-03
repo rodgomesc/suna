@@ -5,6 +5,7 @@ import { useAuth } from '@/components/AuthProvider';
 import { createClient } from '@/lib/supabase/client';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { generateUUID } from '@/lib/utils';
 
 type PresenceStatus = 'online' | 'idle' | 'offline';
 type PresenceEventPayload = {
@@ -33,20 +34,6 @@ const DEBOUNCE_DELAY = 500;
 
 const DISABLE_PRESENCE = true;
 
-function generateSessionId(): string {
-  // Use crypto.randomUUID if available, otherwise fallback to a custom implementation
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  
-  // Fallback UUID v4 implementation
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
 export function PresenceProvider({ children }: { children: ReactNode }) {
   const { user, session } = useAuth();
   const [activeThreadId, setActiveThreadState] = useState<string | null>(null);
@@ -57,7 +44,7 @@ export function PresenceProvider({ children }: { children: ReactNode }) {
     
     let storedId = sessionStorage.getItem('presence_session_id');
     if (!storedId) {
-      storedId = generateSessionId();
+      storedId = generateUUID();
       sessionStorage.setItem('presence_session_id', storedId);
     } else {
     }

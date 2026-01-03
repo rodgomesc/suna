@@ -39,7 +39,7 @@ import { NotificationDropdown } from '../notifications/notification-dropdown';
 import { UsageLimitsPopover } from './usage-limits-popover';
 import { useSidebar } from '@/components/ui/sidebar';
 import { useWelcomeBannerStore } from '@/stores/welcome-banner-store';
-import { cn } from '@/lib/utils';
+import { cn, generateUUID } from '@/lib/utils';
 import { DynamicGreeting } from '@/components/ui/dynamic-greeting';
 import { useOptimisticFilesStore } from '@/stores/optimistic-files-store';
 import { trackPurchase, getStoredCheckoutData, clearCheckoutData } from '@/lib/analytics/gtm';
@@ -342,8 +342,8 @@ export function DashboardContent() {
         pendingFiles: pendingFiles.length,
       });
 
-      const threadId = crypto.randomUUID();
-      const projectId = crypto.randomUUID();
+      const threadId = generateUUID();
+      const projectId = generateUUID();
       
       // Note: No need to clear files here - navigation to new page will unmount this component
       setIsRedirecting(true);

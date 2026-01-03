@@ -19,6 +19,7 @@ import {
 import { isLocalMode } from '@/lib/config';
 import { toast } from 'sonner';
 import type { ChatInputHandles } from '@/components/thread/chat-input/chat-input';
+import { generateUUID } from '@/lib/utils';
 
 // Use next/dynamic with ssr:false to prevent prefetching heavy chunks
 const AnimatedBg = dynamic(
@@ -228,8 +229,8 @@ export function HeroSection() {
                 return new File([file], normalizedName, { type: file.type });
             });
 
-            const threadId = crypto.randomUUID();
-            const projectId = crypto.randomUUID();
+            const threadId = generateUUID();
+            const projectId = generateUUID();
             const trimmedMessage = message.trim();
 
             let promptWithFiles = trimmedMessage;

@@ -23,6 +23,7 @@ import {
   isExtractableArchive,
   formatFileSize,
 } from '@/lib/constants/upload-limits';
+import { generateUUID } from '@/lib/utils';
 
 const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || '';
 
@@ -105,7 +106,7 @@ const handleLocalFilesOptimistic = async (
 
   const newUploadedFiles: UploadedFile[] = processedFiles.map((file) => {
     const normalizedName = normalizeFilenameToNFC(file.name);
-    const fileId = crypto.randomUUID();
+    const fileId = generateUUID();
 
     return {
       name: normalizedName,
@@ -202,7 +203,7 @@ const handleLocalFiles = async (
 
   const newUploadedFiles: UploadedFile[] = filteredFiles.map((file) => {
     const normalizedName = normalizeFilenameToNFC(file.name);
-    const fileId = crypto.randomUUID();
+    const fileId = generateUUID();
 
     return {
       name: normalizedName,
